@@ -31,9 +31,9 @@ conflict with `AGENTS.md` or Superpowers.
 ## Considered and not included
 
 - `python-testing-patterns` (wshobson/agents): generic pytest material that
-  leans on mocks and in-memory SQLite, asks for every failure case to be tested
-  and overlaps with Superpowers test-driven development. This conflicts with
-  testing against real PostgreSQL and with the brief's two unhappy paths.
+  whose database examples use mocks and in-memory SQLite in place of a real
+  database, where this project tests database behaviour against PostgreSQL. It
+  also overlaps with Superpowers test-driven development.
 - `design-postgres-tables` (timescale/pg-aiguide): overlaps with the Supabase
   skill; excluded by the repository owner after a separate review reported an
   accuracy problem.

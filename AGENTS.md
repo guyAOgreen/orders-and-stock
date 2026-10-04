@@ -23,6 +23,8 @@ The system must:
 - Persist products and stock, and expose current stock for a SKU.
 - Accept orders during a brief stock-capability interruption and apply the
   stock updates after recovery.
+- Keep the Orders and Stock capabilities as components that can run and evolve
+  independently. A single process with a background worker is acceptable.
 - Provide a small seed/burst command that includes duplicate orders.
 - Implement exactly one Task 2 option: an integration surface or a daily
   report.
