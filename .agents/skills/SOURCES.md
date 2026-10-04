@@ -30,7 +30,7 @@ conflict with `AGENTS.md` or Superpowers.
 
 ## Considered and not included
 
-- `python-testing-patterns` (wshobson/agents): generic pytest material that
+- `python-testing-patterns` (wshobson/agents): generic pytest material
   whose database examples use mocks and in-memory SQLite in place of a real
   database, where this project tests database behaviour against PostgreSQL. It
   also overlaps with Superpowers test-driven development.
