@@ -10,6 +10,7 @@ with a plain KeyboardInterrupt instead.
 import logging
 import signal
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -96,15 +97,36 @@ def sigint_on(request: pytest.FixtureRequest) -> Iterator[SigintOnStatement]:
         event.remove(Engine, "after_cursor_execute", trigger)
 
 
+BACKSTOP_SECONDS = 10
+
+
 def _run_with_backstop(settings: Settings) -> int:
-    """Run the worker; if the expected signal never comes, send one after a
-    generous delay so the test fails on its assertions instead of hanging."""
-    backstop = threading.Timer(10, signal.raise_signal, args=(signal.SIGINT,))
-    backstop.start()
+    """Run the worker; if the expected signal never comes, send one so the
+    test fails on its assertions instead of hanging.
+
+    The backstop raises SIGINT only once the worker has installed its own
+    handler. Before that, pytest's handler would turn it into a
+    KeyboardInterrupt and abort the session, however slow the startup.
+    """
+    done = threading.Event()
+    pytest_handler = signal.getsignal(signal.SIGINT)
+
+    def backstop() -> None:
+        if done.wait(BACKSTOP_SECONDS):
+            return
+        while not done.is_set():
+            if signal.getsignal(signal.SIGINT) is not pytest_handler:
+                signal.raise_signal(signal.SIGINT)
+                return
+            time.sleep(0.1)
+
+    thread = threading.Thread(target=backstop, daemon=True)
+    thread.start()
     try:
         return run(settings)
     finally:
-        backstop.cancel()
+        done.set()
+        thread.join(timeout=1)
 
 
 # After two rows are processed the third claim finds nothing: an idle worker.

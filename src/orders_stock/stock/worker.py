@@ -28,8 +28,9 @@ def process_one(session: Session, stop: threading.Event | None = None) -> bool:
     pending. A failure is logged with the row's ids and re-raised.
 
     If ``stop`` is set by the time the row has been claimed, the claim is
-    rolled back and nothing is applied, so a shutdown request that lands
-    between the caller's stop check and the claim cannot start another order.
+    rolled back and nothing is applied. That check is the boundary between a
+    claim that is abandoned and an order that is finished: a stop request
+    seen after it lets the order complete whole.
     """
     work_id = order_id = None
     try:
@@ -74,9 +75,9 @@ def run_worker(
     Rows are processed back to back while any are pending, one session and
     one transaction each. When the queue is empty, or an attempt fails, the
     loop waits ``poll_interval`` seconds (or until stopped) and tries again.
-    ``stop`` is checked before each attempt and again once a row is claimed,
-    so no order starts after a stop request; one already being applied is
-    finished.
+    ``stop`` is checked before each attempt and again once a row is claimed;
+    a claim that finds the flag set is released unapplied, and an order past
+    that point is finished whole.
     A failed row stays pending and is simply retried; see "Stock worker" in
     SOLUTION.md for the limitation that implies.
     """
