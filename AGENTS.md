@@ -56,11 +56,24 @@ Keep these three groups separate. Do not treat a proposal as a decision.
 - The API and the stock worker are separate processes from one codebase,
   communicating only through PostgreSQL.
 - Order acceptance writes a pending stock-work row in the same transaction
-  as the order. The worker claims rows with `FOR UPDATE SKIP LOCKED` and
+  as the order. The order row is inserted (`ON CONFLICT DO NOTHING`) before
+  SKU validation, so the unique constraint arbitrates repeats even against
+  an uncommitted original. The worker claims rows with `FOR UPDATE SKIP LOCKED` and
   applies the stock decrements and the completion marker in one transaction
   per order.
 - Insufficient stock is out of scope: no stock check at acceptance, no
   non-negative constraint, stock may go negative.
+- Orders API: `POST /orders` returns 201 for a new order and 200 with the
+  existing order for a repeated `order_ref`; idempotency is by `order_ref`
+  alone and a well-formed repeat's payload is neither validated against the
+  catalogue nor compared. `GET /orders/{order_ref}`
+  reports `status` (`accepted`) and `stock_status` (`pending`/`applied`)
+  as separate fields. Unknown SKU is 422 with a string `detail`; unknown
+  order is 404. `order_ref` is restricted to URL-unreserved characters
+  (letters, digits, `.`, `_`, `~`, `-`), at most 128 long and not only dots;
+  `sku` and `customer_id` are at most 128 characters and may not contain NUL. Repeated SKUs in one request are merged into one line. The
+  service function owns commit and rollback; the request-scoped session
+  dependency owns only the session's lifetime.
 - Task 2 Option B: the daily report.
 - Schema: products are keyed by SKU; money is integer cents and timestamps
   are `timestamptz`. The stock-work row has a unique foreign key to the

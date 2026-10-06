@@ -7,13 +7,14 @@ Python and PostgreSQL. The brief is in [docs/Requirements.pdf](docs/Requirements
 
 ## Status
 
-The project skeleton and the database schema are in place: FastAPI with
-SQLAlchemy, Psycopg and Alembic, a PostgreSQL 17 container, separate API and
-stock worker entry points, and migrations for products, orders, order items and
-stock work. The API serves a health endpoint and the worker starts, checks the
-database and exits. Order intake, stock processing and the daily report are
-implemented in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the
-design and [AGENTS.md](AGENTS.md) for the development rules.
+The schema and the Orders intake API are in place: FastAPI with SQLAlchemy,
+Psycopg and Alembic, a PostgreSQL 17 container, separate API and stock worker
+entry points, migrations for products, orders, order items and stock work, and
+`POST /orders` and `GET /orders/{order_ref}` with idempotent acceptance by
+`order_ref`. The worker still only starts, checks the database and exits.
+Stock processing, the seed/burst command and the daily report are implemented
+in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the design and
+[AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
 
@@ -54,6 +55,45 @@ application. `API_HOST`, `API_PORT` and `LOG_LEVEL` can be set in `.env`.
 
 Try it: `curl http://127.0.0.1:8000/health` returns `{"status":"ok"}`.
 
+### Orders API
+
+Products must exist before orders can reference them. Until the seed command
+lands, insert a couple by hand:
+
+```bash
+docker compose exec postgres psql -U orders_stock -d orders_stock -c \
+  "INSERT INTO products (sku, name, price_cents, stock) VALUES
+   ('BAN-001', 'Bananas 1kg', 199, 50), ('MLK-002', 'Milk 2L', 2599, 20)
+   ON CONFLICT (sku) DO NOTHING;"
+```
+
+Create an order. Prices are read at acceptance and copied onto the items:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/orders -H 'content-type: application/json' \
+  -d '{"order_ref":"web-100045","customer_id":"cust-42",
+       "items":[{"sku":"BAN-001","qty":2},{"sku":"MLK-002","qty":1}]}'
+```
+
+```
+HTTP/1.1 201 Created
+{"order_ref":"web-100045","customer_id":"cust-42",
+ "items":[{"sku":"BAN-001","qty":2,"unit_price_cents":199},
+          {"sku":"MLK-002","qty":1,"unit_price_cents":2599}],
+ "total_cents":2997,"status":"accepted","stock_status":"pending",
+ "accepted_at":"2026-10-06T17:28:40.003164Z"}
+```
+
+Send the same request again and the response is `200 OK` with the same order;
+nothing is written. `GET /orders/web-100045` returns the same body. `status`
+is the acceptance status and `stock_status` is `pending` until the worker
+applies the stock decrement, then `applied`. An unknown SKU is rejected with
+`422` and `{"detail":"Unknown SKU(s): NOPE-000"}`; an unknown `order_ref` on
+`GET` is `404`. An `order_ref` may contain letters, digits, `.`, `_`, `~` and
+`-` (up to 128 characters, not only dots) so it can appear unencoded in the
+`GET` path. The
+interactive documentation at `/docs` lists both routes.
+
 ## Test and check
 
 ```bash
@@ -75,8 +115,8 @@ The same checks run in GitHub Actions on every pull request and push to
 
 | Path | Purpose |
 |---|---|
-| `src/orders_stock/api/` | FastAPI application factory and the API entry point |
-| `src/orders_stock/orders/` | Orders capability |
+| `src/orders_stock/api/` | FastAPI application factory, the session dependency and the API entry point |
+| `src/orders_stock/orders/` | Orders capability: request/response schemas, the acceptance service and its router |
 | `src/orders_stock/stock/` | Stock capability |
 | `src/orders_stock/worker_main.py` | Stock worker entry point |
 | `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |

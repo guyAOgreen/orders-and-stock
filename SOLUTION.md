@@ -23,19 +23,26 @@ Orders tables.
 
 ### Accepting an order (one transaction)
 
-1. Read current prices for the requested SKUs.
-2. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING`.
-3. If the row was inserted: insert the order items with the unit price in
-   effect, store the total, insert one pending stock-work row, commit.
-4. If it conflicted: write nothing and return the existing order.
+1. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING` and a
+   provisional total of zero, before any validation.
+2. If it conflicted, the `order_ref` already exists, committed or still in
+   flight on another connection: roll back, having written nothing, and
+   return the existing order. A structurally valid repeat is not validated
+   against the catalogue or compared with the stored order.
+3. Otherwise validate the SKUs and read their current prices; an unknown SKU
+   rolls the provisional row back and is rejected.
+4. Store the total, insert the order items with the unit price in effect,
+   insert one pending stock-work row, commit.
 
-The unique constraint on `order_ref` is the arbiter for concurrent duplicate
-submissions, so two racing requests with the same `order_ref` produce one
-order. A unique constraint on the work row's order id means a repeat can never
-enqueue a second stock update. Because order, items and work commit together,
-an accepted order can never lack its stock work. Unit prices are copied onto
-the items at acceptance, so later price changes do not alter historical
-totals.
+The unique constraint on `order_ref` is the sole arbiter of duplicates. Two
+racing requests with the same `order_ref` produce one order, and because the
+insert comes first, a repeat that arrives while its original is still
+uncommitted waits for that transaction and then sees the conflict, instead of
+being validated as a new order. A unique constraint on the work row's order
+id means a repeat can never enqueue a second stock update. Because order,
+items and work commit together, an accepted order can never lack its stock
+work. Unit prices are copied onto the items at acceptance, so later price
+changes do not alter historical totals.
 
 ### Applying stock (one transaction per order)
 
@@ -224,6 +231,81 @@ decrement, and there is no non-negative constraint on stock.
 - **Behaviour if the assumption fails:** a negative stock level, not an
   error. Acceptance confirms persistence; it does not reserve inventory.
 
+### Orders API
+
+`POST /orders` accepts `{order_ref, customer_id, items: [{sku, qty}]}` and
+`GET /orders/{order_ref}` returns the order. Both return the same body:
+`order_ref`, `customer_id`, `items` (each with `sku`, `qty` and the
+`unit_price_cents` snapshot), `total_cents`, `accepted_at`, and two separate
+status fields, `status` and `stock_status`.
+
+- **201 for a new order, 200 for a repeat.** A repeated `order_ref` returns
+  the existing order with 200 and writes nothing, so the call is idempotent
+  from the client's side and the seed/burst command can count new and
+  duplicate outcomes by status code. A 409 was rejected because a repeat is
+  a success, not an error. "The same body" means the stored order details;
+  `stock_status` may legitimately have moved from `pending` to `applied`
+  between two submissions.
+- **Idempotency is keyed by `order_ref` alone.** Pydantic still rejects a
+  structurally invalid repeat (no items, `qty` below 1) with 422, but a
+  well-formed repeat is not validated against the catalogue or compared
+  with the stored order, so a repeat with different items, or with an
+  unknown SKU, returns the original order, even when the original is still
+  being accepted on another connection. Detecting a changed payload would
+  need a comparison rule and a response for the mismatch, which the brief
+  does not ask for.
+- **Insert before validate.** The order row is claimed first, with a
+  provisional total, and completed after validation in the same
+  transaction. The alternative, validating first and then inserting, needs
+  a lookup for the sequential repeat and still lets a repeat racing an
+  uncommitted original slip past the constraint into validation, which
+  makes the contract above timing-dependent. The cost is one `UPDATE` of
+  the total per accepted order and a rolled-back row per rejected request.
+- **Two status fields.** `status` is always `accepted` for a stored order
+  (an order that is not accepted does not exist). `stock_status` is derived
+  from the work row: `pending` until the worker processes it, then
+  `applied`. The database stores `processed` on the work row; the API says
+  `applied` because it describes the effect on stock, not the worker's
+  bookkeeping.
+- **Unknown SKU is 422.** The body is `{"detail": "Unknown SKU(s): A, B"}`,
+  a plain string rather than Pydantic's list of field errors, because the
+  failure concerns the request as a whole against the catalogue. Nothing is
+  written. Structural errors (no items, `qty` below 1, blank strings) are
+  Pydantic's usual 422.
+- **Repeated SKUs in one request are merged** into one order item and one
+  work-payload entry with the summed quantity, so the stored order has one
+  line per SKU and the worker decrements each SKU once.
+- **Range checks.** `qty` is bounded by PostgreSQL's `integer` in the request
+  schema, and the merged quantities and total are checked against `integer`
+  and `bigint` before insert, so an oversized order is a 422 rather than a
+  database error.
+- **`order_ref` format.** Letters, digits, `.`, `_`, `~` and `-`, at most
+  128 characters, and not only dots: the URL "unreserved" set, so every
+  accepted `order_ref` appears unencoded in `GET /orders/{order_ref}`. A
+  slash would split the path segment and make an accepted order unreadable,
+  and `.` or `..` are path segments that URL normalisation removes; the
+  alternative, a path-converter route that swallows slashes, still leaves
+  other characters to encode. Clients that use arbitrary keys would need to
+  map them. The `GET` path parameter carries the same constraints, so a ref
+  that could never have been accepted (for example one containing an encoded
+  NUL, which psycopg would reject with a server error) is a 422 before any
+  query, and every value the Orders API sends to PostgreSQL has been
+  validated at the boundary. `sku` and `customer_id` are free text but may not contain NUL,
+  which PostgreSQL text cannot hold and psycopg rejects client-side; without
+  the check that request would be a 500, not a 422. The 128-character cap on
+  all three identifiers is an API choice, not a database requirement:
+  PostgreSQL `text` is unbounded, and the cap simply keeps identifiers at a
+  size that is sensible to index, log and display.
+- **Wiring.** The application lifespan creates the engine and session
+  factory and disposes the engine on shutdown. A dependency yields one
+  `Session` per request and owns only its lifetime. The service function
+  owns the write transaction: it commits a successful acceptance and rolls
+  back a conflicting or failed one, so a caller that keeps the session,
+  such as a script, can retry without inheriting a half-written
+  transaction. Reads leave the usual implicit transaction, which the
+  session's lifetime ends. The Orders module reads the work row's status
+  but imports nothing from the Stock module.
+
 ### Task 2: Option B, daily report
 
 One endpoint returning, for a calendar day, total orders, revenue, units sold
@@ -290,8 +372,11 @@ per SKU and current stock per SKU.
 
 - Stock is sufficient for the demonstrated workload; seed data supports the
   full burst.
-- Orders arrive with valid SKUs and positive quantities; validation beyond
-  the request schema is out of scope.
+- Orders are validated for structure, positive quantities and known SKUs;
+  business validation beyond that (customer existence, order size limits)
+  is out of scope.
+- A well-formed repeat of an `order_ref` is the same order. Payload
+  differences between repeats are not detected.
 - Monetary values are integer cents, as in the brief's example data.
 - Report days are calendar days in UTC by acceptance time. Revenue is the
   sum of accepted order totals; duplicates are excluded because they are
