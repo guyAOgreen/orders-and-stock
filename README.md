@@ -7,12 +7,13 @@ Python and PostgreSQL. The brief is in [docs/Requirements.pdf](docs/Requirements
 
 ## Status
 
-The project skeleton is in place: FastAPI with SQLAlchemy, Psycopg and Alembic,
-a PostgreSQL 17 container, and separate API and stock worker entry points. The
-API serves a health endpoint and the worker starts, checks the database and
-exits. Orders, stock and the daily report are implemented in the follow-up
-issues. See [SOLUTION.md](SOLUTION.md) for the design and
-[AGENTS.md](AGENTS.md) for the development rules.
+The project skeleton and the database schema are in place: FastAPI with
+SQLAlchemy, Psycopg and Alembic, a PostgreSQL 17 container, separate API and
+stock worker entry points, and migrations for products, orders, order items and
+stock work. The API serves a health endpoint and the worker starts, checks the
+database and exits. Order intake, stock processing and the daily report are
+implemented in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the
+design and [AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
 
@@ -78,6 +79,7 @@ The same checks run in GitHub Actions on every pull request and push to
 | `src/orders_stock/orders/` | Orders capability |
 | `src/orders_stock/stock/` | Stock capability |
 | `src/orders_stock/worker_main.py` | Stock worker entry point |
+| `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |
 | `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |
 | `docker-compose.yml`, `docker/` | PostgreSQL container and its init script |
