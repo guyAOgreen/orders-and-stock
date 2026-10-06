@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Lint, type-check, migrate and test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        # Service containers start before any step can read the checkout, so
+        # these local-only values are literals. They must match .env.example;
+        # the "Check service credentials" step fails the build if they drift.
+        env:
+          POSTGRES_USER: orders_stock
+          POSTGRES_PASSWORD: orders_stock
+          POSTGRES_DB: orders_stock
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U orders_stock -d orders_stock"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Load .env.example into the job environment
+        # CI uses the same file a developer copies to .env, so it is tested as is.
+        run: grep -v '^#' .env.example | grep . >> "$GITHUB_ENV"
+
+      - name: Check service credentials match .env.example
+        run: |
+          for pair in POSTGRES_USER=orders_stock POSTGRES_PASSWORD=orders_stock POSTGRES_DB=orders_stock; do
+            grep -qx "$pair" .env.example || { echo "::error::$pair in ci.yml does not match .env.example"; exit 1; }
+          done
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Create the test database
+        # A service container cannot mount docker/postgres-init, so create it here.
+        run: psql "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5433/$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${POSTGRES_DB}_test OWNER $POSTGRES_USER;"
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Test
+        # Fixtures migrate the test database through Alembic before the first test.
+        run: uv run pytest

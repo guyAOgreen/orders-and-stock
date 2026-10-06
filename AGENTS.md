@@ -224,4 +224,7 @@ All commands run from the repository root. Each was run successfully on Linux
 
 Tests need the PostgreSQL container and a `.env` (copy `.env.example`). Add
 dependencies with `uv add <package>` (or `uv add --dev <package>`) so
-`uv.lock` stays current; commit the lockfile.
+`uv.lock` stays current; commit the lockfile. CI
+(`.github/workflows/ci.yml`) runs the same commands with `uv sync --locked`,
+so a stale lockfile fails the build. When a command here changes, change the
+workflow in the same pull request.
