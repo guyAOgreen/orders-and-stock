@@ -90,7 +90,8 @@ is the acceptance status and `stock_status` is `pending` until the worker
 applies the stock decrement, then `applied`. An unknown SKU is rejected with
 `422` and `{"detail":"Unknown SKU(s): NOPE-000"}`; an unknown `order_ref` on
 `GET` is `404`. An `order_ref` may contain letters, digits, `.`, `_`, `~` and
-`-` (up to 128 characters) so it can appear unencoded in the `GET` path. The
+`-` (up to 128 characters, not only dots) so it can appear unencoded in the
+`GET` path. The
 interactive documentation at `/docs` lists both routes.
 
 ## Test and check

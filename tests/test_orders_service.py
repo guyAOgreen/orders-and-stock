@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,16 +52,23 @@ def _row_counts(session_factory: sessionmaker[Session]) -> tuple[int, int, int]:
         return count(Order), count(OrderItem), count(StockWork)
 
 
+@dataclass
+class Hold:
+    first_arrived: threading.Event = field(default_factory=threading.Event)
+    observed: list[str] = field(default_factory=list)
+
+
 @pytest.fixture
-def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[list[str]]:
+def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[Hold]:
     """Make two racing acceptances genuinely overlap.
 
     The first transaction to insert its order row pauses, still uncommitted,
     until PostgreSQL reports another backend waiting on a lock: the second
     insert blocked on the unique order_ref. Only then does the first commit.
     """
-    first_arrived = threading.Event()
-    observed: list[str] = []
+    hold = Hold()
+    first_arrived = hold.first_arrived
+    observed = hold.observed
 
     def _another_backend_is_waiting_on_a_lock() -> bool:
         with engine.connect() as probe:
@@ -74,7 +82,7 @@ def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[list
             ).scalar_one()
         return bool(waiting)
 
-    def hold(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
+    def hold_insert(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
         if "INSERT INTO orders" not in statement or first_arrived.is_set():
             return
         # Check-then-set is safe: the second insert is blocked inside
@@ -87,17 +95,17 @@ def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[list
             time.sleep(0.02)
         observed.append("second insert blocked while the first was uncommitted")
 
-    event.listen(engine, "after_cursor_execute", hold)
+    event.listen(engine, "after_cursor_execute", hold_insert)
     try:
-        yield observed
+        yield hold
     finally:
-        event.remove(engine, "after_cursor_execute", hold)
+        event.remove(engine, "after_cursor_execute", hold_insert)
 
 
 def test_concurrent_duplicates_yield_one_order_and_one_work_row(
     session_factory: sessionmaker[Session],
     product: None,
-    hold_first_order_insert_until_second_blocks: list[str],
+    hold_first_order_insert_until_second_blocks: Hold,
 ) -> None:
     def submit(_: int) -> tuple[Any, bool]:
         with session_factory() as session:
@@ -106,9 +114,40 @@ def test_concurrent_duplicates_yield_one_order_and_one_work_row(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(submit, range(2)))
 
-    assert hold_first_order_insert_until_second_blocks, "transactions did not overlap"
+    assert hold_first_order_insert_until_second_blocks.observed, "no overlap"
     assert sorted(created for _, created in results) == [False, True]
     assert results[0][0] == results[1][0]
+    assert _row_counts(session_factory) == (1, 1, 1)
+
+
+def test_repeat_with_unknown_sku_racing_its_uncommitted_original_gets_the_original(
+    session_factory: sessionmaker[Session],
+    product: None,
+    hold_first_order_insert_until_second_blocks: Hold,
+) -> None:
+    # The contract says a well-formed repeat is not catalogue-validated. That
+    # must hold even when the original is still uncommitted, so the repeat
+    # has to reach the unique constraint before any SKU validation.
+    repeat = OrderRequest(
+        order_ref="web-1",
+        customer_id="someone-else",
+        items=[OrderItemRequest(sku="NOPE-000", qty=9)],
+    )
+
+    def submit(request: OrderRequest) -> tuple[Any, bool]:
+        with session_factory() as session:
+            return accept_order(session, request)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        original = pool.submit(submit, _request())
+        assert hold_first_order_insert_until_second_blocks.first_arrived.wait(5)
+        duplicate = pool.submit(submit, repeat)
+        original_details, original_created = original.result()
+        duplicate_details, duplicate_created = duplicate.result()
+
+    assert (original_created, duplicate_created) == (True, False)
+    assert duplicate_details == original_details
+    assert duplicate_details.customer_id == "cust-42"
     assert _row_counts(session_factory) == (1, 1, 1)
 
 

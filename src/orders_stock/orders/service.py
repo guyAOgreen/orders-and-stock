@@ -1,14 +1,14 @@
 """Accepting orders and reading their details.
 
-Functions here own the transaction: ``accept_order`` commits on success and
-rolls back on every other exit, so a caller may keep using the session. See
-"Accepting an order" in SOLUTION.md.
+``accept_order`` owns the write transaction: it commits a successful
+acceptance and rolls back a conflicting or failed one, so a caller may keep
+using the session afterwards. See "Accepting an order" in SOLUTION.md.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, selectinload
 
@@ -56,36 +56,48 @@ def accept_order(session: Session, request: OrderRequest) -> tuple[OrderDetails,
 
     Returns the order's details and whether this call created it. A repeated
     ``order_ref`` returns the existing order and writes nothing; the repeat's
-    payload is neither validated against the catalogue nor compared.
+    payload is neither validated against the catalogue nor compared, even
+    while the original is still being accepted on another connection.
     """
     try:
-        existing = get_order(session, request.order_ref)
-        if existing is not None:
-            return existing, False
-
-        quantities = _merge_quantities(request.items)
-        prices = _current_prices(session, list(quantities))
-        unknown = [sku for sku in quantities if sku not in prices]
-        if unknown:
-            raise UnknownSkuError(unknown)
-        total_cents = sum(prices[sku] * qty for sku, qty in quantities.items())
-        _check_ranges(quantities, total_cents)
-
-        order_id = _insert_order(session, request, total_cents)
-        if order_id is not None:
-            _insert_items_and_work(session, order_id, quantities, prices)
-            session.commit()
-        else:
-            # A concurrent duplicate won the race; this transaction wrote nothing.
+        claimed = _claim_order_ref(session, request)
+        if claimed is None:
+            # The order_ref exists, committed or in flight on another
+            # connection: this transaction wrote nothing.
             session.rollback()
+        else:
+            order_id, accepted_at = claimed
+            quantities = _merge_quantities(request.items)
+            prices = _current_prices(session, list(quantities))
+            unknown = [sku for sku in quantities if sku not in prices]
+            if unknown:
+                raise UnknownSkuError(unknown)
+            total_cents = sum(prices[sku] * qty for sku, qty in quantities.items())
+            _check_ranges(quantities, total_cents)
+            _complete_order(session, order_id, total_cents, quantities, prices)
+            session.commit()
+            return (
+                OrderDetails(
+                    order_ref=request.order_ref,
+                    customer_id=request.customer_id,
+                    items=[
+                        OrderLine(sku=sku, qty=qty, unit_price_cents=prices[sku])
+                        for sku, qty in quantities.items()
+                    ],
+                    total_cents=total_cents,
+                    stock_status="pending",
+                    accepted_at=accepted_at,
+                ),
+                True,
+            )
     except BaseException:
         session.rollback()
         raise
 
-    details = get_order(session, request.order_ref)
-    if details is None:  # pragma: no cover - either we or the winner committed it
-        raise RuntimeError(f"order {request.order_ref!r} is absent after acceptance")
-    return details, order_id is not None
+    existing = get_order(session, request.order_ref)
+    if existing is None:  # pragma: no cover - the winner's transaction committed
+        raise RuntimeError(f"order {request.order_ref!r} conflicted but is absent")
+    return existing, False
 
 
 def get_order(session: Session, order_ref: str) -> OrderDetails | None:
@@ -115,6 +127,30 @@ def get_order(session: Session, order_ref: str) -> OrderDetails | None:
     )
 
 
+def _claim_order_ref(
+    session: Session, request: OrderRequest
+) -> tuple[int, datetime] | None:
+    """Insert the order row with a provisional total, or return ``None``.
+
+    This runs before any validation so that the unique constraint on
+    order_ref is the sole arbiter of duplicates, including a repeat that
+    arrives while the original is still uncommitted: the repeat's insert waits
+    for the original's transaction and then returns no row. The provisional
+    total is replaced before commit; a validation failure rolls the row back.
+    """
+    row = session.execute(
+        insert(Order)
+        .values(
+            order_ref=request.order_ref,
+            customer_id=request.customer_id,
+            total_cents=0,
+        )
+        .on_conflict_do_nothing(constraint="uq_orders_order_ref")
+        .returning(Order.id, Order.accepted_at)
+    ).one_or_none()
+    return None if row is None else (row.id, row.accepted_at)
+
+
 def _merge_quantities(items: list[OrderItemRequest]) -> dict[str, int]:
     """One entry per SKU, in first-seen order, summing repeated SKUs."""
     quantities: dict[str, int] = {}
@@ -140,29 +176,17 @@ def _check_ranges(quantities: dict[str, int], total_cents: int) -> None:
         raise AmountOutOfRangeError("Order total too large")
 
 
-def _insert_order(
-    session: Session, request: OrderRequest, total_cents: int
-) -> int | None:
-    """Insert the order row; ``None`` when the order_ref already exists.
-
-    The unique constraint on order_ref arbitrates concurrent duplicates: the
-    loser's insert waits for the winner's transaction and then returns no row.
-    """
-    return session.execute(
-        insert(Order)
-        .values(
-            order_ref=request.order_ref,
-            customer_id=request.customer_id,
-            total_cents=total_cents,
-        )
-        .on_conflict_do_nothing(constraint="uq_orders_order_ref")
-        .returning(Order.id)
-    ).scalar_one_or_none()
-
-
-def _insert_items_and_work(
-    session: Session, order_id: int, quantities: dict[str, int], prices: dict[str, int]
+def _complete_order(
+    session: Session,
+    order_id: int,
+    total_cents: int,
+    quantities: dict[str, int],
+    prices: dict[str, int],
 ) -> None:
+    """Store the total, the priced items and the pending stock work."""
+    session.execute(
+        update(Order).where(Order.id == order_id).values(total_cents=total_cents)
+    )
     session.execute(
         insert(OrderItem),
         [

@@ -207,6 +207,8 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         _order_request(order_ref="web/100045"),
         _order_request(order_ref="web 100045"),
         _order_request(order_ref="w" * 129),
+        _order_request(order_ref="."),
+        _order_request(order_ref=".."),
         {"customer_id": "cust-42", "items": [{"sku": "BAN-001", "qty": 1}]},
     ],
     ids=[
@@ -218,6 +220,8 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         "slash-in-order-ref",
         "space-in-order-ref",
         "order-ref-too-long",
+        "dot-order-ref",
+        "dot-dot-order-ref",
         "missing-order-ref",
     ],
 )

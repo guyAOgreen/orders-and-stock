@@ -4,9 +4,9 @@ These are the HTTP contract; the database models live in ``orders_stock.models``
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 # PostgreSQL ``integer``, which holds product prices, quantities and unit prices.
 PG_INTEGER_MAX = 2**31 - 1
@@ -21,13 +21,21 @@ ORDER_REF_PATTERN = r"^[A-Za-z0-9._~-]+$"
 ORDER_REF_MAX_LENGTH = 128
 
 
+def _not_a_dot_segment(order_ref: str) -> str:
+    # "." and ".." pass the pattern but are special path segments that URL
+    # normalisation removes, so they could never reach the GET route.
+    if set(order_ref) == {"."}:
+        raise ValueError("order_ref must contain a character other than '.'")
+    return order_ref
+
+
 class OrderItemRequest(BaseModel):
     sku: str = Field(min_length=1)
     qty: int = Field(gt=0, le=PG_INTEGER_MAX)
 
 
 class OrderRequest(BaseModel):
-    order_ref: str = Field(
+    order_ref: Annotated[str, AfterValidator(_not_a_dot_segment)] = Field(
         min_length=1,
         max_length=ORDER_REF_MAX_LENGTH,
         pattern=ORDER_REF_PATTERN,

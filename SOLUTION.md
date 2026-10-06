@@ -23,24 +23,26 @@ Orders tables.
 
 ### Accepting an order (one transaction)
 
-1. Look up the `order_ref`. If an order exists, return it: a structurally
-   valid repeat is not validated against the catalogue or compared with the
-   stored order.
-2. Validate the SKUs and read their current prices; reject unknown SKUs.
-3. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING`.
-4. If the row was inserted: insert the order items with the unit price in
-   effect, store the total, insert one pending stock-work row, commit.
-5. If it conflicted (a concurrent duplicate won the race since step 1): roll
-   back, having written nothing, and return the existing order.
+1. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING` and a
+   provisional total of zero, before any validation.
+2. If it conflicted, the `order_ref` already exists, committed or still in
+   flight on another connection: roll back, having written nothing, and
+   return the existing order. A structurally valid repeat is not validated
+   against the catalogue or compared with the stored order.
+3. Otherwise validate the SKUs and read their current prices; an unknown SKU
+   rolls the provisional row back and is rejected.
+4. Store the total, insert the order items with the unit price in effect,
+   insert one pending stock-work row, commit.
 
-The unique constraint on `order_ref` is the arbiter for concurrent duplicate
-submissions, so two racing requests with the same `order_ref` produce one
-order; the lookup in step 1 only makes the sequential repeat cheap and
-consistent. A unique constraint on the work row's order id means a repeat can
-never enqueue a second stock update. Because order, items and work commit
-together, an accepted order can never lack its stock work. Unit prices are
-copied onto the items at acceptance, so later price changes do not alter
-historical totals.
+The unique constraint on `order_ref` is the sole arbiter of duplicates. Two
+racing requests with the same `order_ref` produce one order, and because the
+insert comes first, a repeat that arrives while its original is still
+uncommitted waits for that transaction and then sees the conflict, instead of
+being validated as a new order. A unique constraint on the work row's order
+id means a repeat can never enqueue a second stock update. Because order,
+items and work commit together, an accepted order can never lack its stock
+work. Unit prices are copied onto the items at acceptance, so later price
+changes do not alter historical totals.
 
 ### Applying stock (one transaction per order)
 
@@ -248,9 +250,17 @@ status fields, `status` and `stock_status`.
   structurally invalid repeat (no items, `qty` below 1) with 422, but a
   well-formed repeat is not validated against the catalogue or compared
   with the stored order, so a repeat with different items, or with an
-  unknown SKU, returns the original order. Detecting a changed payload
-  would need a comparison rule and a response for the mismatch, which the
-  brief does not ask for.
+  unknown SKU, returns the original order, even when the original is still
+  being accepted on another connection. Detecting a changed payload would
+  need a comparison rule and a response for the mismatch, which the brief
+  does not ask for.
+- **Insert before validate.** The order row is claimed first, with a
+  provisional total, and completed after validation in the same
+  transaction. The alternative, validating first and then inserting, needs
+  a lookup for the sequential repeat and still lets a repeat racing an
+  uncommitted original slip past the constraint into validation, which
+  makes the contract above timing-dependent. The cost is one `UPDATE` of
+  the total per accepted order and a rolled-back row per rejected request.
 - **Two status fields.** `status` is always `accepted` for a stored order
   (an order that is not accepted does not exist). `stock_status` is derived
   from the work row: `pending` until the worker processes it, then
@@ -270,18 +280,21 @@ status fields, `status` and `stock_status`.
   and `bigint` before insert, so an oversized order is a 422 rather than a
   database error.
 - **`order_ref` format.** Letters, digits, `.`, `_`, `~` and `-`, at most
-  128 characters: the URL "unreserved" set, so every accepted `order_ref`
-  appears unencoded in `GET /orders/{order_ref}`. A slash would split the
-  path segment and make an accepted order unreadable; the alternative, a
-  path-converter route that swallows slashes, still leaves other characters
-  to encode. Clients that use arbitrary keys would need to map them.
+  128 characters, and not only dots: the URL "unreserved" set, so every
+  accepted `order_ref` appears unencoded in `GET /orders/{order_ref}`. A
+  slash would split the path segment and make an accepted order unreadable,
+  and `.` or `..` are path segments that URL normalisation removes; the
+  alternative, a path-converter route that swallows slashes, still leaves
+  other characters to encode. Clients that use arbitrary keys would need to
+  map them.
 - **Wiring.** The application lifespan creates the engine and session
   factory and disposes the engine on shutdown. A dependency yields one
   `Session` per request and owns only its lifetime. The service function
-  owns the transaction: it commits on success and rolls back on every
-  other exit (conflict, validation error, failed statement), so a caller
-  that keeps the session, such as a script, can retry without inheriting a
-  half-written transaction. The Orders module reads the work row's status
+  owns the write transaction: it commits a successful acceptance and rolls
+  back a conflicting or failed one, so a caller that keeps the session,
+  such as a script, can retry without inheriting a half-written
+  transaction. Reads leave the usual implicit transaction, which the
+  session's lifetime ends. The Orders module reads the work row's status
   but imports nothing from the Stock module.
 
 ### Task 2: Option B, daily report
@@ -367,11 +380,3 @@ per SKU and current stock per SKU.
 - Both processes depend on one PostgreSQL database. A worker crash does not
   stop intake, but a database outage stops both.
 - Insufficient stock yields a negative level rather than a rejection.
-- A malformed repeat that races its own original can be rejected. The
-  `order_ref` lookup runs before SKU validation, so a well-formed repeat
-  with an unknown SKU normally returns the original order; but if the
-  original is still uncommitted when the repeat looks up the `order_ref`,
-  the repeat is validated and gets 422. The window is one transaction and a
-  retry returns the original. Closing it would need an advisory lock on the
-  `order_ref` before validation, which would move duplicate arbitration
-  away from the unique constraint for a case the brief does not describe.
