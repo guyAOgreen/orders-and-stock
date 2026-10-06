@@ -45,7 +45,7 @@ jobs:
             grep -qx "$pair" .env.example || { echo "::error::$pair in ci.yml does not match .env.example"; exit 1; }
           done
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
 
