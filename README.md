@@ -11,9 +11,9 @@ The schema and the Orders intake API are in place: FastAPI with SQLAlchemy,
 Psycopg and Alembic, a PostgreSQL 17 container, separate API and stock worker
 entry points, migrations for products, orders, order items and stock work, and
 `POST /orders` and `GET /orders/{order_ref}` with idempotent acceptance by
-`order_ref`. The worker still only starts, checks the database and exits.
-Stock processing, the seed/burst command and the daily report are implemented
-in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the design and
+`order_ref`. The stock worker applies pending stock work, one order per
+transaction, and `GET /stock?sku=...` reads current stock. The seed/burst
+command and the daily report are implemented in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the design and
 [AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
@@ -51,7 +51,13 @@ uv run orders-stock-worker      # the stock worker
 ```
 
 For development with auto-reload, `uv run fastapi dev` serves the same
-application. `API_HOST`, `API_PORT` and `LOG_LEVEL` can be set in `.env`.
+application. `API_HOST`, `API_PORT`, `LOG_LEVEL` and
+`WORKER_POLL_INTERVAL_SECONDS` (how long the worker waits when it finds no
+pending work; default 1 second) can be set in `.env`.
+
+The worker logs each order it applies and stops cleanly on Ctrl+C (SIGINT) or
+SIGTERM: the order being applied is committed or rolled back whole, no
+further order is started, and the process exits with status 0.
 
 Try it: `curl http://127.0.0.1:8000/health` returns `{"status":"ok"}`.
 
@@ -91,8 +97,47 @@ applies the stock decrement, then `applied`. An unknown SKU is rejected with
 `422` and `{"detail":"Unknown SKU(s): NOPE-000"}`; an unknown `order_ref` on
 `GET` is `404`. An `order_ref` may contain letters, digits, `.`, `_`, `~` and
 `-` (up to 128 characters, not only dots) so it can appear unencoded in the
-`GET` path. The
-interactive documentation at `/docs` lists both routes.
+`GET` path. The interactive documentation at `/docs` lists every route.
+
+### Stock API
+
+Current stock for a SKU, read live:
+
+```bash
+curl -s 'http://127.0.0.1:8000/stock?sku=BAN-001'
+```
+
+```
+{"sku":"BAN-001","name":"Bananas 1kg","stock":48}
+```
+
+An unknown SKU is `404` with `{"detail":"Unknown SKU"}`; a missing or empty
+`sku` is `422`. The SKU is a query parameter rather than a path segment so
+that any catalogue SKU, including one containing `/` or `.`, can be read.
+
+### Demonstrating the interruption and catch-up
+
+Stock is applied by the worker, so stopping the worker simulates the stock
+capability being unavailable while the API keeps accepting orders. With
+PostgreSQL and the API running:
+
+1. **Stop the worker** (Ctrl+C in its terminal), or do not start it yet.
+2. **Submit orders.** They are accepted as usual:
+
+   ```bash
+   curl -s -X POST http://127.0.0.1:8000/orders -H 'content-type: application/json'      -d '{"order_ref":"web-200001","customer_id":"cust-7","items":[{"sku":"BAN-001","qty":5}]}'
+   ```
+
+3. **Observe the backlog.** `GET /orders/web-200001` reports
+   `"stock_status":"pending"` and `GET /stock?sku=BAN-001` is unchanged. The
+   pending work is in PostgreSQL, so it survives any restart.
+4. **Restart the worker:** `uv run orders-stock-worker`. It logs
+   `applied stock for order_id=...` for each backlog order, oldest first.
+5. **Observe the catch-up.** The order now reports `"stock_status":"applied"`
+   and the stock level has dropped by the ordered quantity.
+
+Submitting the same `order_ref` again at any point returns `200` with the
+existing order and leaves stock untouched, which is the duplicate path.
 
 ## Test and check
 
@@ -117,8 +162,8 @@ The same checks run in GitHub Actions on every pull request and push to
 |---|---|
 | `src/orders_stock/api/` | FastAPI application factory, the session dependency and the API entry point |
 | `src/orders_stock/orders/` | Orders capability: request/response schemas, the acceptance service and its router |
-| `src/orders_stock/stock/` | Stock capability |
-| `src/orders_stock/worker_main.py` | Stock worker entry point |
+| `src/orders_stock/stock/` | Stock capability: the worker loop (`worker.py`), the stock router and its schemas |
+| `src/orders_stock/worker_main.py` | Stock worker entry point: startup check, signal handling, the polling loop |
 | `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |
 | `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |

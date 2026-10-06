@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     log_level: LogLevel = "INFO"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # How long the stock worker waits when it finds no pending work or an
+    # attempt fails. Positive and finite, so misconfiguration cannot busy-loop.
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0, allow_inf_nan=False)
 
     @field_validator("log_level", mode="before")
     @classmethod
