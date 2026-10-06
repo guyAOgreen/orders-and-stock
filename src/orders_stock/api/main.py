@@ -7,6 +7,8 @@ from orders_stock.config import get_settings
 from orders_stock.logging_config import configure_logging
 
 # Module-level application for `fastapi dev` / `uvicorn orders_stock.api.main:app`.
+# Importing this module reads the real settings; tests build the app with
+# `create_app(settings)` instead and must not import it.
 app = create_app()
 
 

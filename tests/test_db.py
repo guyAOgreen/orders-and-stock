@@ -1,16 +1,18 @@
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 
-def test_test_database_is_migrated_to_head(engine: Engine) -> None:
+def test_test_database_is_migrated_to_head(
+    engine: Engine, alembic_config: Config
+) -> None:
     with engine.connect() as connection:
-        versions = (
-            connection.execute(text("SELECT version_num FROM alembic_version"))
-            .scalars()
-            .all()
-        )
+        version = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
 
-    assert len(versions) == 1
+    assert version == ScriptDirectory.from_config(alembic_config).get_current_head()
 
 
 def test_sessions_use_the_test_database(session_factory: sessionmaker[Session]) -> None:
@@ -24,6 +26,7 @@ def test_committed_work_is_visible_from_another_connection(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
     with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS probe"))
         connection.execute(text("CREATE TABLE probe (n integer)"))
     try:
         with session_factory() as session:
@@ -36,4 +39,4 @@ def test_committed_work_is_visible_from_another_connection(
         assert count == 1
     finally:
         with engine.begin() as connection:
-            connection.execute(text("DROP TABLE probe"))
+            connection.execute(text("DROP TABLE IF EXISTS probe"))

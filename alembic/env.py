@@ -18,6 +18,8 @@ if config.config_file_name is not None:
 if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
+# Autogenerate only sees tables whose model modules have been imported. Import
+# every module that defines mapped models here as they are added.
 target_metadata = Base.metadata
 
 

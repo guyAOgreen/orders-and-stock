@@ -206,12 +206,13 @@ limitations.
 
 ### Commands
 
-All commands run from the repository root. Each has been verified.
+All commands run from the repository root. Each was run successfully on Linux
+(Debian container) and, in its `python -m` form where noted, on Windows.
 
 | Purpose | Command |
 |---|---|
 | Install dependencies | `uv sync` |
-| Start PostgreSQL | `docker compose up -d` |
+| Start PostgreSQL | `docker compose up -d --wait` |
 | Apply migrations | `uv run alembic upgrade head` |
 | New migration | `uv run alembic revision -m "<description>"` (use `--autogenerate` once models exist) |
 | Run the API | `uv run orders-stock-api` (or `uv run python -m orders_stock.api.main`) |

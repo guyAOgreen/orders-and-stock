@@ -25,7 +25,7 @@ issues. See [SOLUTION.md](SOLUTION.md) for the design and
 
 ```bash
 cp .env.example .env            # connection URLs matching docker-compose.yml
-docker compose up -d            # PostgreSQL 17 on localhost:5433
+docker compose up -d --wait     # PostgreSQL 17 on localhost:5433; waits until it is ready
 uv sync                         # creates .venv with Python 3.12 and all dependencies
 uv run alembic upgrade head     # applies the schema to the development database
 ```
@@ -69,7 +69,7 @@ database is unreachable.
 | `src/orders_stock/orders/` | Orders capability |
 | `src/orders_stock/stock/` | Stock capability |
 | `src/orders_stock/worker_main.py` | Stock worker entry point |
-| `src/orders_stock/config.py`, `db.py` | Settings and database engine/session factory |
+| `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |
 | `docker-compose.yml`, `docker/` | PostgreSQL container and its init script |
 | `tests/` | pytest suite; fixtures in `tests/conftest.py` |

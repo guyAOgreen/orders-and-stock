@@ -28,6 +28,21 @@ def test_settings_default_log_level_is_info(monkeypatch: pytest.MonkeyPatch) -> 
     assert Settings(_env_file=None).log_level == "INFO"
 
 
+def test_settings_normalise_log_level_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+
+    assert Settings(_env_file=None).log_level == "DEBUG"
+
+
+def test_settings_reject_unknown_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
+    monkeypatch.setenv("LOG_LEVEL", "LOUD")
+
+    with pytest.raises(ValidationError, match="log_level"):
+        Settings(_env_file=None)
+
+
 def test_settings_default_api_bind_address(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
     monkeypatch.setenv("API_PORT", "9001")

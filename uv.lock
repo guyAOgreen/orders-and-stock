@@ -953,6 +953,7 @@ dev = [
     { name = "httpx2" },
     { name = "mypy" },
     { name = "pytest" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 
@@ -970,6 +971,7 @@ dev = [
     { name = "httpx2", specifier = ">=2.13.1" },
     { name = "mypy", specifier = ">=2.4.0" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
     { name = "ruff", specifier = ">=0.16.10" },
 ]
 

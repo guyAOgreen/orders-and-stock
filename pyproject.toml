@@ -46,7 +46,7 @@ known-third-party = ["alembic"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "alembic/env.py"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
@@ -62,6 +62,7 @@ dev = [
     "httpx2>=2.13.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",
+    "python-dotenv>=1.2.4",
     "ruff>=0.16.10",
 ]
 

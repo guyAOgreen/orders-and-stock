@@ -15,7 +15,7 @@ from alembic import command
 from alembic.config import Config
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, inspect, make_url, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from orders_stock.api.app import create_app
@@ -31,7 +31,8 @@ def _test_database_url() -> str:
     url = os.environ.get("TEST_DATABASE_URL")
     if not url:
         raise RuntimeError("TEST_DATABASE_URL must be set (see .env.example)")
-    if not url.rstrip("/").endswith("_test"):
+    database = make_url(url).database or ""
+    if not database.endswith("_test"):
         raise RuntimeError(f"Refusing to run tests against non-test database: {url}")
     return url
 
@@ -42,9 +43,14 @@ def settings() -> Settings:
 
 
 @pytest.fixture(scope="session")
-def engine(settings: Settings) -> Iterator[Engine]:
-    alembic_config = Config(str(PROJECT_ROOT / "alembic.ini"))
-    alembic_config.set_main_option("sqlalchemy.url", settings.database_url)
+def alembic_config(settings: Settings) -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", settings.database_url)
+    return config
+
+
+@pytest.fixture(scope="session")
+def engine(settings: Settings, alembic_config: Config) -> Iterator[Engine]:
     command.upgrade(alembic_config, "head")
 
     engine = make_engine(settings.database_url)
