@@ -1,0 +1,3 @@
+# Normalise line endings so checkouts on Windows do not alter files the Linux/macOS
+# tooling and CI run against.
+* text=auto eol=lf

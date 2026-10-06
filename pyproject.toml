@@ -64,3 +64,6 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]
+
+[tool.fastapi]
+entrypoint = "orders_stock.api.main:app"

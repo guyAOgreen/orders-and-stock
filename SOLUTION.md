@@ -93,9 +93,10 @@ distinguishable.
   processing must be selected and integrated separately. This provides
   flexibility but leaves more architectural decisions to the application.
 
-### Database access: SQLAlchemy 2.0, Psycopg 3 and Alembic
+### Database access: SQLAlchemy 2.x, Psycopg 3 and Alembic
 
-SQLAlchemy 2.0 (2.0-style API) for persistence, Psycopg 3 as the driver and
+SQLAlchemy 2.x (the 2.0-style API; 2.1 at the time of writing) for
+persistence, Psycopg 3 as the driver and
 Alembic for versioned migrations. ORM-mapped models define tables and handle
 ordinary reads and writes; the concurrency-critical statements are written
 explicitly as Core or SQL: the `ON CONFLICT` insert, the `SKIP LOCKED` claim
@@ -190,6 +191,52 @@ per SKU and current stock per SKU.
   and retention semantics, plus a demonstration consumer. Option B provides
   the required external visibility through aggregate queries over data the
   design already produces.
+
+### Development tooling
+
+- **uv and Python 3.12.** uv manages the interpreter, virtual environment
+  and lockfile, so every command has one form, `uv run ...`, on Linux, macOS
+  and Windows, and CI installs it with a first-party action. Python 3.12 is
+  widely available and every dependency ships wheels for it; 3.13 or 3.14
+  would add nothing for this brief. Alternatives: `pip` with `venv` and a
+  requirements file (no lockfile without extra tooling), or Poetry (heavier
+  for the same result). Cost: a reviewer needs one install step for uv.
+- **Ruff and mypy strict.** Ruff formats and lints with one configuration
+  block. mypy runs in strict mode on the application and tests; SQLAlchemy
+  2.x and Pydantic are typed natively so no plugins beyond `pydantic.mypy`
+  are needed. Pyright would also serve; mypy is the conventional CI choice
+  and needs no Node runtime.
+- **PostgreSQL 17 in Docker Compose, application native.** One compose
+  service with an init script that creates the development and test
+  databases. The application runs natively so the worker interruption demo
+  is a plain Ctrl+C. The container publishes host port 5433 to avoid
+  clashing with a locally installed PostgreSQL. Reviewers without Docker can
+  point `.env` at any PostgreSQL 17. Containerising the application itself
+  is deferred: configuration is environment-only and there are two entry
+  points, so adding a Dockerfile later is cheap, and it would be an extra way
+  to run the project rather than a replacement for the native path.
+- **pydantic-settings.** Typed settings from environment variables with a
+  `.env` file for development and a committed `.env.example`. A missing or
+  malformed database URL fails at startup with a clear error. The
+  alternative, hand-written `os.environ` reads, duplicates the parsing and
+  validation pydantic-settings provides.
+- **Test database strategy.** A dedicated `orders_stock_test` database,
+  migrated to head once per session by running the Alembic migrations (so
+  the real setup path is exercised), truncated between tests, with sessions
+  that commit for real. This is what makes the concurrency tests possible:
+  concurrent duplicate submissions, `SKIP LOCKED` claims and failures
+  injected mid-transaction all need separate connections and visible
+  commits. Tests fail rather than skip when the database is unreachable.
+  Alternatives: per-test transaction rollback on one connection (rules out
+  the concurrency tests), a database per test (slow for the same guarantee)
+  or Testcontainers (self-contained, but adds a Docker requirement inside
+  the test run when the compose database and CI service container already
+  exist).
+- **Entry points.** `orders-stock-api` and `orders-stock-worker` console
+  scripts, with `python -m` equivalents for environments that block script
+  launchers. `fastapi dev` also serves the app via the `[tool.fastapi]`
+  entrypoint for auto-reload during development. Engines use a 5 second
+  connect timeout so a process fails fast when PostgreSQL is unreachable.
 
 ## Assumptions
 

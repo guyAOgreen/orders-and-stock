@@ -10,6 +10,8 @@ class Settings(BaseSettings):
 
     database_url: str
     log_level: str = "INFO"
+    api_host: str = "127.0.0.1"
+    api_port: int = 8000
 
 
 @lru_cache

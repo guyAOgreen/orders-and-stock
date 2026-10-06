@@ -9,7 +9,9 @@ from orders_stock.db import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep application loggers alive when migrations run inside a process
+    # (for example the test suite); fileConfig disables them by default.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The URL comes from the application settings unless the caller has already
 # set one on the Config (the test suite points it at the test database).

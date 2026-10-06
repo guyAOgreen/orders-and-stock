@@ -62,10 +62,16 @@ Keep these three groups separate. Do not treat a proposal as a decision.
 - Insufficient stock is out of scope: no stock check at acceptance, no
   non-negative constraint, stock may go negative.
 - Task 2 Option B: the daily report.
+- uv with Python 3.12; Ruff for formatting and linting; mypy in strict mode;
+  pytest. PostgreSQL 17 runs in Docker Compose on host port 5433; the
+  application runs natively. Settings come from environment variables via
+  pydantic-settings. Tests use the dedicated `orders_stock_test` database,
+  migrated with Alembic once per session and truncated between tests, with
+  real commits.
 
 **Unresolved**
 
-- Python version and development tooling (decided during scaffolding).
+- None at present.
 
 Resolve the decisions needed for the current issue, move them to "Agreed
 decisions" in the same change, and record their rationale in `SOLUTION.md`. Do
@@ -141,7 +147,9 @@ generic skill recommendations. In particular:
 - Catch specific exceptions and preserve useful diagnostics.
 - Keep configuration outside application logic and secrets out of Git.
 - Use timezone-aware timestamps and exact monetary representations.
-- Use the formatter, linter and type checker once they are chosen.
+- Run Ruff and mypy before considering a change complete; both must be clean.
+- Keep `.agents/` and `.claude/` out of formatting and linting; they hold
+  vendored content.
 
 ## Architecture rules
 
@@ -196,5 +204,23 @@ application.
 `SOLUTION.md` should explain the design, trade-offs, assumptions and known
 limitations.
 
-Add exact development commands here once tooling is established and the
-commands have been verified. Do not invent commands in advance. None exist yet.
+### Commands
+
+All commands run from the repository root. Each has been verified.
+
+| Purpose | Command |
+|---|---|
+| Install dependencies | `uv sync` |
+| Start PostgreSQL | `docker compose up -d` |
+| Apply migrations | `uv run alembic upgrade head` |
+| New migration | `uv run alembic revision -m "<description>"` (use `--autogenerate` once models exist) |
+| Run the API | `uv run orders-stock-api` (or `uv run python -m orders_stock.api.main`) |
+| Run the worker | `uv run orders-stock-worker` (or `uv run python -m orders_stock.worker_main`) |
+| Tests | `uv run pytest` |
+| Format check / fix | `uv run ruff format --check .` / `uv run ruff format .` |
+| Lint / fix | `uv run ruff check .` / `uv run ruff check --fix .` |
+| Type check | `uv run mypy` |
+
+Tests need the PostgreSQL container and a `.env` (copy `.env.example`). Add
+dependencies with `uv add <package>` (or `uv add --dev <package>`) so
+`uv.lock` stays current; commit the lockfile.

@@ -26,3 +26,13 @@ def test_settings_default_log_level_is_info(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.delenv("LOG_LEVEL", raising=False)
 
     assert Settings(_env_file=None).log_level == "INFO"
+
+
+def test_settings_default_api_bind_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
+    monkeypatch.setenv("API_PORT", "9001")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.api_host == "127.0.0.1"
+    assert settings.api_port == 9001
