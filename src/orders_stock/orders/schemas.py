@@ -18,7 +18,7 @@ StockStatus = Literal["pending", "applied"]
 # URL "unreserved" characters (RFC 3986), so an order_ref needs no encoding and
 # round-trips through the GET path, where a slash would split the segment.
 ORDER_REF_PATTERN = r"^[A-Za-z0-9._~-]+$"
-# Bounds the identifiers stored in text columns.
+# An API choice, not a database limit: PostgreSQL ``text`` is unbounded.
 IDENTIFIER_MAX_LENGTH = 128
 
 
