@@ -197,6 +197,21 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
+    "path",
+    ["/orders/%00", "/orders/web%20100045", "/orders/" + "w" * 129],
+    ids=["nul", "space", "too-long"],
+)
+def test_order_ref_outside_the_accepted_format_is_rejected_before_querying(
+    client: TestClient, path: str
+) -> None:
+    # Such a ref can never have been accepted; it is a validation error,
+    # not a lookup, so it never reaches PostgreSQL.
+    response = client.get(path)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
     "request_body",
     [
         _order_request(items=[]),

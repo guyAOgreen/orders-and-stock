@@ -1,9 +1,13 @@
 """HTTP routes for the Orders capability."""
 
-from fastapi import APIRouter, HTTPException, Response, status
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Path, Response, status
 
 from orders_stock.api.deps import SessionDep
 from orders_stock.orders.schemas import (
+    IDENTIFIER_MAX_LENGTH,
+    ORDER_REF_PATTERN,
     OrderItemResponse,
     OrderRequest,
     OrderResponse,
@@ -50,8 +54,15 @@ def create_order(
     return _to_response(details)
 
 
+# Same constraints as OrderRequest.order_ref: a ref outside them can never
+# have been accepted, so it is rejected (422) before any query runs.
+OrderRefPath = Annotated[
+    str, Path(pattern=ORDER_REF_PATTERN, max_length=IDENTIFIER_MAX_LENGTH)
+]
+
+
 @router.get("/{order_ref}", responses={status.HTTP_404_NOT_FOUND: {}})
-def read_order(order_ref: str, session: SessionDep) -> OrderResponse:
+def read_order(order_ref: OrderRefPath, session: SessionDep) -> OrderResponse:
     details = get_order(session, order_ref)
     if details is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Order not found")

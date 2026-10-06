@@ -286,7 +286,11 @@ status fields, `status` and `stock_status`.
   and `.` or `..` are path segments that URL normalisation removes; the
   alternative, a path-converter route that swallows slashes, still leaves
   other characters to encode. Clients that use arbitrary keys would need to
-  map them. `sku` and `customer_id` are free text but may not contain NUL,
+  map them. The `GET` path parameter carries the same constraints, so a ref
+  that could never have been accepted (for example one containing an encoded
+  NUL, which psycopg would reject with a server error) is a 422 before any
+  query, and every value the Orders API sends to PostgreSQL has been
+  validated at the boundary. `sku` and `customer_id` are free text but may not contain NUL,
   which PostgreSQL text cannot hold and psycopg rejects client-side; without
   the check that request would be a 500, not a 422. The 128-character cap on
   all three identifiers is an API choice, not a database requirement:
