@@ -23,19 +23,23 @@ Orders tables.
 
 ### Accepting an order (one transaction)
 
-1. Read current prices for the requested SKUs.
-2. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING`.
-3. If the row was inserted: insert the order items with the unit price in
+1. Look up the `order_ref`. If an order exists, return it: a repeat is not
+   validated or compared against the stored order.
+2. Validate the SKUs and read their current prices; reject unknown SKUs.
+3. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING`.
+4. If the row was inserted: insert the order items with the unit price in
    effect, store the total, insert one pending stock-work row, commit.
-4. If it conflicted: write nothing and return the existing order.
+5. If it conflicted (a concurrent duplicate won the race since step 1): roll
+   back, having written nothing, and return the existing order.
 
 The unique constraint on `order_ref` is the arbiter for concurrent duplicate
 submissions, so two racing requests with the same `order_ref` produce one
-order. A unique constraint on the work row's order id means a repeat can never
-enqueue a second stock update. Because order, items and work commit together,
-an accepted order can never lack its stock work. Unit prices are copied onto
-the items at acceptance, so later price changes do not alter historical
-totals.
+order; the lookup in step 1 only makes the sequential repeat cheap and
+consistent. A unique constraint on the work row's order id means a repeat can
+never enqueue a second stock update. Because order, items and work commit
+together, an accepted order can never lack its stock work. Unit prices are
+copied onto the items at acceptance, so later price changes do not alter
+historical totals.
 
 ### Applying stock (one transaction per order)
 
@@ -224,6 +228,51 @@ decrement, and there is no non-negative constraint on stock.
 - **Behaviour if the assumption fails:** a negative stock level, not an
   error. Acceptance confirms persistence; it does not reserve inventory.
 
+### Orders API
+
+`POST /orders` accepts `{order_ref, customer_id, items: [{sku, qty}]}` and
+`GET /orders/{order_ref}` returns the order. Both return the same body:
+`order_ref`, `customer_id`, `items` (each with `sku`, `qty` and the
+`unit_price_cents` snapshot), `total_cents`, `accepted_at`, and two separate
+status fields, `status` and `stock_status`.
+
+- **201 for a new order, 200 for a repeat.** A repeated `order_ref` returns
+  the existing order with 200 and writes nothing, so the call is idempotent
+  from the client's side and the seed/burst command can count new and
+  duplicate outcomes by status code. A 409 was rejected because a repeat is
+  a success, not an error. "The same body" means the stored order details;
+  `stock_status` may legitimately have moved from `pending` to `applied`
+  between two submissions.
+- **Idempotency is keyed by `order_ref` alone.** The repeat's payload is not
+  validated or compared, so a repeat with different items, or with an
+  unknown SKU, still returns the original order. Detecting a changed payload
+  would need a comparison rule and a response for the mismatch, which the
+  brief does not ask for.
+- **Two status fields.** `status` is always `accepted` for a stored order
+  (an order that is not accepted does not exist). `stock_status` is derived
+  from the work row: `pending` until the worker processes it, then
+  `applied`. The database stores `processed` on the work row; the API says
+  `applied` because it describes the effect on stock, not the worker's
+  bookkeeping.
+- **Unknown SKU is 422.** The body is `{"detail": "Unknown SKU(s): A, B"}`,
+  a plain string rather than Pydantic's list of field errors, because the
+  failure concerns the request as a whole against the catalogue. Nothing is
+  written. Structural errors (no items, `qty` below 1, blank strings) are
+  Pydantic's usual 422.
+- **Repeated SKUs in one request are merged** into one order item and one
+  work-payload entry with the summed quantity, so the stored order has one
+  line per SKU and the worker decrements each SKU once.
+- **Range checks.** `qty` is bounded by PostgreSQL's `integer` in the request
+  schema, and the merged quantities and total are checked against `integer`
+  and `bigint` before insert, so an oversized order is a 422 rather than a
+  database error.
+- **Wiring.** The application lifespan creates the engine and session
+  factory and disposes the engine on shutdown. A dependency yields one
+  `Session` per request and owns only its lifetime; the service function
+  owns commit and rollback, so the transaction boundary is visible in one
+  place. The Orders module reads the work row's status but imports nothing
+  from the Stock module.
+
 ### Task 2: Option B, daily report
 
 One endpoint returning, for a calendar day, total orders, revenue, units sold
@@ -290,8 +339,11 @@ per SKU and current stock per SKU.
 
 - Stock is sufficient for the demonstrated workload; seed data supports the
   full burst.
-- Orders arrive with valid SKUs and positive quantities; validation beyond
-  the request schema is out of scope.
+- Orders are validated for structure, positive quantities and known SKUs;
+  business validation beyond that (customer existence, order size limits)
+  is out of scope.
+- A repeated `order_ref` is the same order. Payload differences between
+  repeats are not detected.
 - Monetary values are integer cents, as in the brief's example data.
 - Report days are calendar days in UTC by acceptance time. Revenue is the
   sum of accepted order totals; duplicates are excluded because they are
