@@ -20,12 +20,16 @@ class StockWorkError(RuntimeError):
     """A work row could not be applied; the transaction was rolled back."""
 
 
-def process_one(session: Session) -> bool:
+def process_one(session: Session, stop: threading.Event | None = None) -> bool:
     """Apply the oldest pending work row in one transaction.
 
     Returns whether a row was processed. The transaction is ended on every
     path: committed on success, rolled back on failure or when no row is
     pending. A failure is logged with the row's ids and re-raised.
+
+    If ``stop`` is set by the time the row has been claimed, the claim is
+    rolled back and nothing is applied, so a shutdown request that lands
+    between the caller's stop check and the claim cannot start another order.
     """
     work_id = order_id = None
     try:
@@ -36,7 +40,7 @@ def process_one(session: Session) -> bool:
             .limit(1)
             .with_for_update(skip_locked=True)
         ).one_or_none()
-        if claimed is None:
+        if claimed is None or (stop is not None and stop.is_set()):
             session.rollback()
             return False
         work_id, order_id, items = claimed
@@ -70,13 +74,16 @@ def run_worker(
     Rows are processed back to back while any are pending, one session and
     one transaction each. When the queue is empty, or an attempt fails, the
     loop waits ``poll_interval`` seconds (or until stopped) and tries again.
+    ``stop`` is checked before each attempt and again once a row is claimed,
+    so no order starts after a stop request; one already being applied is
+    finished.
     A failed row stays pending and is simply retried; see "Stock worker" in
     SOLUTION.md for the limitation that implies.
     """
     while not stop.is_set():
         try:
             with session_factory() as session:
-                processed = process_one(session)
+                processed = process_one(session, stop)
         except Exception:
             # Already logged with the row's ids by process_one.
             processed = False

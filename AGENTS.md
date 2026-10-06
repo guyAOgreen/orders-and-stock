@@ -81,7 +81,8 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   and finite) is the wait when the queue is empty or an attempt fails. Retry
   is minimal: a failed row stays pending and is retried indefinitely, with
   no attempt counter or failed state. SIGINT/SIGTERM stop the loop between
-  transactions; a statement already waiting in PostgreSQL is not
+  transactions, with a second check after the claim so a claimed row is
+  released unapplied; a statement already waiting in PostgreSQL is not
   interrupted.
 - Stock API: `GET /stock?sku=...` returns `{sku, name, stock}`; 404 for an
   unknown SKU; 422 for a missing, empty, over-long or NUL-containing `sku`.

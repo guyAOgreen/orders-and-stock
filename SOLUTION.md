@@ -337,9 +337,11 @@ under Applying stock; `GET /stock?sku=...` reads a product's current level.
   it locked, so throughput degrades rather than stops. The next step would
   be an attempts column and a quarantined status, and a decision on whether
   the API exposes that state.
-- **Shutdown.** SIGINT or SIGTERM sets a flag that the loop checks between
-  transactions: the order being applied commits or rolls back whole and no
-  further order starts, then the process exits 0. The flag does not
+- **Shutdown.** SIGINT or SIGTERM sets a flag that the loop checks before
+  each attempt and again once a row has been claimed, so a signal that lands
+  during the claim releases the row unapplied: the order being applied
+  commits or rolls back whole, no further order starts, and the process
+  exits 0. The flag does not
   interrupt a statement already waiting inside PostgreSQL, for example on a
   row lock, so shutdown waits for the current database operation; the
   polling interval bounds idle wake-up, not shutdown. A worker killed
