@@ -3,6 +3,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from orders_stock import models  # noqa: F401  (registers the mapped tables)
 from orders_stock.config import get_settings
 from orders_stock.db import Base
 
@@ -18,8 +19,8 @@ if config.config_file_name is not None:
 if not config.get_main_option("sqlalchemy.url"):
     config.set_main_option("sqlalchemy.url", get_settings().database_url)
 
-# Autogenerate only sees tables whose model modules have been imported. Import
-# every module that defines mapped models here as they are added.
+# Autogenerate only sees tables whose model modules have been imported; all
+# mapped classes live in orders_stock.models, imported above.
 target_metadata = Base.metadata
 
 
@@ -30,6 +31,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        compare_server_default=True,
     )
 
     with context.begin_transaction():
@@ -45,7 +47,13 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        # `alembic check` compares columns, indexes and server defaults, but
+        # not CHECK constraints; tests/test_schema.py covers those.
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_server_default=True,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

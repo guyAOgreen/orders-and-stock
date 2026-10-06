@@ -164,6 +164,51 @@ recovery.
   relies on the stock and work tables sharing one database; a separate
   Stock database would need an idempotency key on the stock side instead.
 
+### Schema
+
+Four tables, created by one Alembic revision after the baseline, mapped in
+`src/orders_stock/models.py`:
+
+| Table | Owner | Purpose |
+|---|---|---|
+| `products` | Stock | SKU (primary key), name, price in cents, stock level |
+| `orders` | Orders | `order_ref` (unique), customer, total in cents, acceptance time |
+| `order_items` | Orders | SKU, quantity and the unit price in effect at acceptance |
+| `stock_work` | Contract | One row per order (unique): status, SKU quantities, timestamps |
+
+Money is integer cents (`integer` for prices, `bigint` for totals) and
+timestamps are `timestamptz`. Prices and totals are checked non-negative and
+quantities positive; stock is deliberately unchecked (see Insufficient stock).
+Constraint names follow a naming convention on the declarative base so later
+migrations and tests can refer to them.
+
+- **SKU as the product key.** The brief, the API, the worker and the report
+  all identify products by SKU, so a surrogate id would only add a join.
+- **Work payload as JSONB.** `stock_work.items` is a JSON array of
+  `{"sku", "qty"}` objects. The work row is a message the worker consumes
+  whole: one insert at acceptance, one claim in the worker, and no second
+  table mirroring `order_items`. The schema guarantees only that the value
+  is an array. Orders builds a valid payload at acceptance with one entry
+  per SKU, summing the quantities of any SKU repeated in the request, and the
+  worker decrements each entry once.
+  Alternative: child rows with a foreign key to `products`, which would
+  validate each SKU in the database and let the worker decrement in one
+  joined update. Not chosen because the API already validates SKUs against
+  `products` and nothing deletes products.
+- **Work row references the order.** `stock_work.order_id` is a unique
+  foreign key to `orders.id`, so a work row can neither be orphaned nor
+  duplicated. This ties the two capabilities to one database, which the
+  design already assumes (see Durable processing). A free-standing
+  `order_ref` column would ease a later split into separate databases.
+- **Status as text with a check.** `pending` or `processed`, plus a check
+  that `processed_at` is set exactly when the status is `processed`. A
+  partial index on pending rows by `created_at` keeps the worker's
+  oldest-first claim cheap as processed rows accumulate.
+- **One models module.** Four tables do not need per-component model files.
+  The component boundary is which tables each component reads and writes,
+  not where the classes are defined, and placing classes in separate modules
+  would not enforce that boundary by itself.
+
 ### Insufficient stock: out of scope
 
 The API accepts without checking stock, the worker always applies the

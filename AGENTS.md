@@ -62,6 +62,14 @@ Keep these three groups separate. Do not treat a proposal as a decision.
 - Insufficient stock is out of scope: no stock check at acceptance, no
   non-negative constraint, stock may go negative.
 - Task 2 Option B: the daily report.
+- Schema: products are keyed by SKU; money is integer cents and timestamps
+  are `timestamptz`. The stock-work row has a unique foreign key to the
+  order and carries the SKU quantities as a JSONB array of `{sku, qty}`
+  objects with one entry per SKU; the schema checks only that it is an
+  array, Orders builds the payload (summing repeated SKUs) and the worker
+  decrements each entry once. All mapped models live in
+  `src/orders_stock/models.py`; constraint names follow the naming
+  convention on `Base`.
 - uv with Python 3.12; Ruff for formatting and linting; mypy in strict mode;
   pytest. PostgreSQL 17 runs in Docker Compose on host port 5433; the
   application runs natively. Settings come from environment variables via
