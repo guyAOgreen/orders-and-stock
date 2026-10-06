@@ -10,9 +10,11 @@ AI-assisted development. There is no application code yet, so there is nothing
 to run. Run instructions will be added here once they exist and have been
 checked.
 
-FastAPI is the chosen web framework. Database tooling, the worker arrangement
-and the choice between Task 2 Option A and Option B are still open; see
-[AGENTS.md](AGENTS.md).
+The architecture is decided: FastAPI with SQLAlchemy, Psycopg and Alembic, a
+separate stock worker process fed by a PostgreSQL pending-work table, and Task
+2 Option B (daily report). See [SOLUTION.md](SOLUTION.md) for the design and
+[AGENTS.md](AGENTS.md) for the resulting development rules. Python version and
+tooling will be chosen during scaffolding.
 
 ## AI-assisted development
 
