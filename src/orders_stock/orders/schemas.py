@@ -15,6 +15,11 @@ PG_BIGINT_MAX = 2**63 - 1
 
 StockStatus = Literal["pending", "applied"]
 
+# URL "unreserved" characters (RFC 3986), so an order_ref needs no encoding and
+# round-trips through the GET path, where a slash would split the segment.
+ORDER_REF_PATTERN = r"^[A-Za-z0-9._~-]+$"
+ORDER_REF_MAX_LENGTH = 128
+
 
 class OrderItemRequest(BaseModel):
     sku: str = Field(min_length=1)
@@ -22,7 +27,12 @@ class OrderItemRequest(BaseModel):
 
 
 class OrderRequest(BaseModel):
-    order_ref: str = Field(min_length=1, description="Client idempotency key")
+    order_ref: str = Field(
+        min_length=1,
+        max_length=ORDER_REF_MAX_LENGTH,
+        pattern=ORDER_REF_PATTERN,
+        description="Client idempotency key: letters, digits, `.`, `_`, `~`, `-`",
+    )
     customer_id: str = Field(min_length=1)
     items: list[OrderItemRequest] = Field(min_length=1)
 

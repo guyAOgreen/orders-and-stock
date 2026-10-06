@@ -67,7 +67,8 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   catalogue nor compared. `GET /orders/{order_ref}`
   reports `status` (`accepted`) and `stock_status` (`pending`/`applied`)
   as separate fields. Unknown SKU is 422 with a string `detail`; unknown
-  order is 404. Repeated SKUs in one request are merged into one line. The
+  order is 404. `order_ref` is restricted to URL-unreserved characters
+  (letters, digits, `.`, `_`, `~`, `-`), at most 128 long. Repeated SKUs in one request are merged into one line. The
   service function owns commit and rollback; the request-scoped session
   dependency owns only the session's lifetime.
 - Task 2 Option B: the daily report.

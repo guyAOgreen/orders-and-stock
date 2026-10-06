@@ -151,16 +151,18 @@ def test_failure_before_commit_leaves_nothing_committed(
     assert _row_counts(session_factory) == (0, 0, 0)
 
 
-def test_order_can_be_accepted_after_an_earlier_attempt_failed(
+def test_failed_attempt_rolls_back_and_leaves_the_session_usable(
     session_factory: sessionmaker[Session],
     product: None,
     fail_work_row_insert: FailureInjector,
 ) -> None:
-    with session_factory() as session, pytest.raises(InjectedFailure):
-        accept_order(session, _request())
-    fail_work_row_insert.armed = False
-
+    # The service owns rollback: a caller that keeps the session must be
+    # able to retry without hitting a failed-transaction error.
     with session_factory() as session:
+        with pytest.raises(InjectedFailure):
+            accept_order(session, _request())
+        fail_work_row_insert.armed = False
+
         _, created = accept_order(session, _request())
 
     assert created is True

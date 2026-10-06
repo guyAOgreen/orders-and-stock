@@ -1,7 +1,8 @@
 """Accepting orders and reading their details.
 
-Functions here own the transaction: ``accept_order`` commits or rolls back the
-session it is given. See "Accepting an order" in SOLUTION.md.
+Functions here own the transaction: ``accept_order`` commits on success and
+rolls back on every other exit, so a caller may keep using the session. See
+"Accepting an order" in SOLUTION.md.
 """
 
 from dataclasses import dataclass
@@ -57,61 +58,34 @@ def accept_order(session: Session, request: OrderRequest) -> tuple[OrderDetails,
     ``order_ref`` returns the existing order and writes nothing; the repeat's
     payload is neither validated against the catalogue nor compared.
     """
-    existing = get_order(session, request.order_ref)
-    if existing is not None:
-        return existing, False
+    try:
+        existing = get_order(session, request.order_ref)
+        if existing is not None:
+            return existing, False
 
-    quantities = _merge_quantities(request.items)
-    prices = _current_prices(session, list(quantities))
-    unknown = [sku for sku in quantities if sku not in prices]
-    if unknown:
-        raise UnknownSkuError(unknown)
-    total_cents = sum(prices[sku] * qty for sku, qty in quantities.items())
-    _check_ranges(quantities, total_cents)
+        quantities = _merge_quantities(request.items)
+        prices = _current_prices(session, list(quantities))
+        unknown = [sku for sku in quantities if sku not in prices]
+        if unknown:
+            raise UnknownSkuError(unknown)
+        total_cents = sum(prices[sku] * qty for sku, qty in quantities.items())
+        _check_ranges(quantities, total_cents)
 
-    # The unique constraint on order_ref arbitrates concurrent duplicates: the
-    # loser's insert returns no row and this transaction writes nothing.
-    order_id = session.execute(
-        insert(Order)
-        .values(
-            order_ref=request.order_ref,
-            customer_id=request.customer_id,
-            total_cents=total_cents,
-        )
-        .on_conflict_do_nothing(constraint="uq_orders_order_ref")
-        .returning(Order.id)
-    ).scalar_one_or_none()
-    if order_id is None:
+        order_id = _insert_order(session, request, total_cents)
+        if order_id is not None:
+            _insert_items_and_work(session, order_id, quantities, prices)
+            session.commit()
+        else:
+            # A concurrent duplicate won the race; this transaction wrote nothing.
+            session.rollback()
+    except BaseException:
         session.rollback()
-        winner = get_order(session, request.order_ref)
-        if winner is None:  # pragma: no cover - the winning transaction committed
-            raise RuntimeError(f"order {request.order_ref!r} conflicted but is absent")
-        return winner, False
+        raise
 
-    session.execute(
-        insert(OrderItem),
-        [
-            {
-                "order_id": order_id,
-                "sku": sku,
-                "quantity": qty,
-                "unit_price_cents": prices[sku],
-            }
-            for sku, qty in quantities.items()
-        ],
-    )
-    session.execute(
-        insert(StockWork).values(
-            order_id=order_id,
-            items=[{"sku": sku, "qty": qty} for sku, qty in quantities.items()],
-        )
-    )
-    session.commit()
-
-    created = get_order(session, request.order_ref)
-    if created is None:  # pragma: no cover - committed a moment ago
-        raise RuntimeError(f"order {request.order_ref!r} missing after commit")
-    return created, True
+    details = get_order(session, request.order_ref)
+    if details is None:  # pragma: no cover - either we or the winner committed it
+        raise RuntimeError(f"order {request.order_ref!r} is absent after acceptance")
+    return details, order_id is not None
 
 
 def get_order(session: Session, order_ref: str) -> OrderDetails | None:
@@ -164,3 +138,46 @@ def _check_ranges(quantities: dict[str, int], total_cents: int) -> None:
         )
     if total_cents > PG_BIGINT_MAX:
         raise AmountOutOfRangeError("Order total too large")
+
+
+def _insert_order(
+    session: Session, request: OrderRequest, total_cents: int
+) -> int | None:
+    """Insert the order row; ``None`` when the order_ref already exists.
+
+    The unique constraint on order_ref arbitrates concurrent duplicates: the
+    loser's insert waits for the winner's transaction and then returns no row.
+    """
+    return session.execute(
+        insert(Order)
+        .values(
+            order_ref=request.order_ref,
+            customer_id=request.customer_id,
+            total_cents=total_cents,
+        )
+        .on_conflict_do_nothing(constraint="uq_orders_order_ref")
+        .returning(Order.id)
+    ).scalar_one_or_none()
+
+
+def _insert_items_and_work(
+    session: Session, order_id: int, quantities: dict[str, int], prices: dict[str, int]
+) -> None:
+    session.execute(
+        insert(OrderItem),
+        [
+            {
+                "order_id": order_id,
+                "sku": sku,
+                "quantity": qty,
+                "unit_price_cents": prices[sku],
+            }
+            for sku, qty in quantities.items()
+        ],
+    )
+    session.execute(
+        insert(StockWork).values(
+            order_id=order_id,
+            items=[{"sku": sku, "qty": qty} for sku, qty in quantities.items()],
+        )
+    )

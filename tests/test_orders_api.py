@@ -204,6 +204,9 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         _order_request(items=[{"sku": "BAN-001", "qty": 2_147_483_648}]),
         _order_request(items=[{"sku": "", "qty": 1}]),
         _order_request(order_ref=""),
+        _order_request(order_ref="web/100045"),
+        _order_request(order_ref="web 100045"),
+        _order_request(order_ref="w" * 129),
         {"customer_id": "cust-42", "items": [{"sku": "BAN-001", "qty": 1}]},
     ],
     ids=[
@@ -212,6 +215,9 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         "quantity-beyond-integer",
         "blank-sku",
         "blank-order-ref",
+        "slash-in-order-ref",
+        "space-in-order-ref",
+        "order-ref-too-long",
         "missing-order-ref",
     ],
 )
@@ -221,6 +227,19 @@ def test_structurally_invalid_requests_are_rejected(
     response = client.post("/orders", json=request_body)
 
     assert response.status_code == 422
+
+
+def test_order_ref_with_url_safe_punctuation_round_trips(
+    client: TestClient, products: None
+) -> None:
+    order_ref = "WEB_2026.10-06~a"
+    created = client.post("/orders", json=_order_request(order_ref=order_ref))
+
+    fetched = client.get(f"/orders/{order_ref}")
+
+    assert created.status_code == 201
+    assert fetched.status_code == 200
+    assert fetched.json()["order_ref"] == order_ref
 
 
 def test_repeated_sku_in_one_request_is_merged_into_one_line(

@@ -269,12 +269,20 @@ status fields, `status` and `stock_status`.
   schema, and the merged quantities and total are checked against `integer`
   and `bigint` before insert, so an oversized order is a 422 rather than a
   database error.
+- **`order_ref` format.** Letters, digits, `.`, `_`, `~` and `-`, at most
+  128 characters: the URL "unreserved" set, so every accepted `order_ref`
+  appears unencoded in `GET /orders/{order_ref}`. A slash would split the
+  path segment and make an accepted order unreadable; the alternative, a
+  path-converter route that swallows slashes, still leaves other characters
+  to encode. Clients that use arbitrary keys would need to map them.
 - **Wiring.** The application lifespan creates the engine and session
   factory and disposes the engine on shutdown. A dependency yields one
-  `Session` per request and owns only its lifetime; the service function
-  owns commit and rollback, so the transaction boundary is visible in one
-  place. The Orders module reads the work row's status but imports nothing
-  from the Stock module.
+  `Session` per request and owns only its lifetime. The service function
+  owns the transaction: it commits on success and rolls back on every
+  other exit (conflict, validation error, failed statement), so a caller
+  that keeps the session, such as a script, can retry without inheriting a
+  half-written transaction. The Orders module reads the work row's status
+  but imports nothing from the Stock module.
 
 ### Task 2: Option B, daily report
 
@@ -359,3 +367,11 @@ per SKU and current stock per SKU.
 - Both processes depend on one PostgreSQL database. A worker crash does not
   stop intake, but a database outage stops both.
 - Insufficient stock yields a negative level rather than a rejection.
+- A malformed repeat that races its own original can be rejected. The
+  `order_ref` lookup runs before SKU validation, so a well-formed repeat
+  with an unknown SKU normally returns the original order; but if the
+  original is still uncommitted when the repeat looks up the `order_ref`,
+  the repeat is validated and gets 422. The window is one transaction and a
+  retry returns the original. Closing it would need an advisory lock on the
+  `order_ref` before validation, which would move duplicate arbitration
+  away from the unique constraint for a case the brief does not describe.
