@@ -1,5 +1,7 @@
 # orders-and-stock
 
+[![CI](https://github.com/guyAOgreen/orders-and-stock/actions/workflows/ci.yml/badge.svg)](https://github.com/guyAOgreen/orders-and-stock/actions/workflows/ci.yml)
+
 Mr D take-home assignment: a minimal orders flow that updates stock, built with
 Python and PostgreSQL. The brief is in [docs/Requirements.pdf](docs/Requirements.pdf).
 
@@ -63,6 +65,10 @@ uv run mypy                     # type checking (strict)
 Integration tests run against `orders_stock_test`, migrate it to head once per
 session and truncate tables between tests. They fail rather than skip if the
 database is unreachable.
+
+The same checks run in GitHub Actions on every pull request and push to
+`main`, against a PostgreSQL 17 service container
+([ci.yml](.github/workflows/ci.yml)).
 
 ## Project layout
 

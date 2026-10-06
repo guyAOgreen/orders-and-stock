@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Local-only credentials, matching .env.example. Nothing outside this run uses them.
+  POSTGRES_USER: orders_stock
+  POSTGRES_PASSWORD: orders_stock
+  POSTGRES_DB: orders_stock
+  DATABASE_URL: postgresql+psycopg://orders_stock:orders_stock@localhost:5432/orders_stock
+  TEST_DATABASE_URL: postgresql+psycopg://orders_stock:orders_stock@localhost:5432/orders_stock_test
+
+jobs:
+  checks:
+    name: Lint, type-check, migrate and test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orders_stock -d orders_stock"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy
+
+      - name: Create the test database
+        # A service container cannot mount docker/postgres-init, so create it here.
+        run: psql "postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${POSTGRES_DB}_test OWNER $POSTGRES_USER;"
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Test
+        # Fixtures migrate the test database through Alembic before the first test.
+        run: uv run pytest
