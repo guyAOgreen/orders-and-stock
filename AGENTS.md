@@ -46,17 +46,26 @@ Keep these three groups separate. Do not treat a proposal as a decision.
 - Python and PostgreSQL.
 - Data persisted in PostgreSQL, not held only in memory.
 
-**Agreed decisions**
+**Agreed decisions** (rationale in `SOLUTION.md`)
 
 - FastAPI is the web framework.
+- SQLAlchemy 2.0 with Psycopg 3 for database access; Alembic for migrations.
+  Pydantic API schemas stay separate from database models.
+- Synchronous database access: `def` endpoints with a `Session`; the worker
+  is a blocking loop.
+- The API and the stock worker are separate processes from one codebase,
+  communicating only through PostgreSQL.
+- Order acceptance writes a pending stock-work row in the same transaction
+  as the order. The worker claims rows with `FOR UPDATE SKIP LOCKED` and
+  applies the stock decrements and the completion marker in one transaction
+  per order.
+- Insufficient stock is out of scope: no stock check at acceptance, no
+  non-negative constraint, stock may go negative.
+- Task 2 Option B: the daily report.
 
 **Unresolved**
 
-- Database access library and migration tooling.
-- Synchronous or asynchronous database access.
-- Worker execution and communication mechanism.
-- Task 2 Option A or Option B.
-- Python version and development tooling.
+- Python version and development tooling (decided during scaffolding).
 
 Resolve the decisions needed for the current issue, move them to "Agreed
 decisions" in the same change, and record their rationale in `SOLUTION.md`. Do
@@ -90,7 +99,8 @@ not silently adopt a skill's preferred stack as a project decision.
 ## Publishing and GitHub permissions
 
 - Obtain explicit user permission before pushing commits, creating a pull
-  request (including a draft), or posting comments on issues or pull requests.
+  request (including a draft), creating or editing issues, or posting
+  comments on issues or pull requests.
 - Local commits do not need permission. Committing locally does not grant
   permission to publish.
 - Permission applies only to the action and scope authorised. Do not infer
@@ -133,16 +143,37 @@ generic skill recommendations. In particular:
 - Use timezone-aware timestamps and exact monetary representations.
 - Use the formatter, linter and type checker once they are chosen.
 
+## Architecture rules
+
+- Keep Orders and Stock in separate modules. The API must not call stock
+  code when accepting an order; it records pending stock work for the worker.
+- The pending-work table is the contract between the components. It carries
+  the SKU quantities the worker needs; the worker does not read Orders
+  tables. Change it deliberately and update both sides together.
+- Keep API request and response schemas (Pydantic) separate from SQLAlchemy
+  models.
+- Write the concurrency-critical statements explicitly rather than relying
+  on ORM behaviour: the idempotent order insert (`ON CONFLICT`), claiming
+  pending work (`FOR UPDATE SKIP LOCKED`) and the stock decrement.
+- Do not add stock checks, reservations, or failure states for insufficient
+  stock. Record the assumption instead.
+
 ## Persistence and reliability
 
-- Make transaction boundaries and commit ownership explicit.
-- Enforce critical invariants in PostgreSQL where appropriate.
-- Handle duplicate submissions safely under concurrent requests.
-- Preserve historical order pricing when product prices change.
+- Make transaction boundaries and commit ownership explicit. Order
+  acceptance is one transaction; applying stock for one order is one
+  transaction.
+- Enforce critical invariants in PostgreSQL: unique `order_ref`, unique
+  work record per order.
+- Handle duplicate submissions safely under concurrent requests; the unique
+  constraint, not application checks, is the arbiter.
+- Preserve historical order pricing when product prices change by storing
+  unit prices on order items.
 - Persist the work needed for recovery; do not rely solely on memory.
-- Ensure retrying stock processing cannot apply an order twice.
-- Keep acceptance status and stock-processing status understandable.
-- Use versioned schema changes once migration tooling is selected.
+- Ensure retrying stock processing cannot apply an order twice: the
+  decrement and the completion marker commit together.
+- Report order acceptance status and stock-processing status separately.
+- Use versioned Alembic migrations for all schema changes.
 
 ## Testing
 
