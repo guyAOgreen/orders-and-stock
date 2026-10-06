@@ -208,7 +208,10 @@ per SKU and current stock per SKU.
   and needs no Node runtime.
 - **PostgreSQL 17 in Docker Compose, application native.** One compose
   service with an init script that creates the development and test
-  databases. The application runs natively so the worker interruption demo
+  databases. Credentials are not hard-coded in the compose file; it reads
+  them from the gitignored `.env`, with local-only values in `.env.example`,
+  and refuses to start if they are missing. The application runs natively so
+  the worker interruption demo
   is a plain Ctrl+C. The container publishes host port 5433 to avoid
   clashing with a locally installed PostgreSQL. Reviewers without Docker can
   point `.env` at any PostgreSQL 17. Containerising the application itself

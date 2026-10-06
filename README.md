@@ -30,9 +30,12 @@ uv sync                         # creates .venv with Python 3.12 and all depende
 uv run alembic upgrade head     # applies the schema to the development database
 ```
 
-PostgreSQL is published on host port 5433 rather than 5432 so it does not
-clash with a locally installed server. The test database `orders_stock_test`
-is created automatically the first time the container starts.
+Both the container and the application read their credentials from `.env`,
+so copy it before starting Compose. The values in `.env.example` are for local
+development only. PostgreSQL is published on host port 5433 rather than 5432
+so it does not clash with a locally installed server. The test database
+`orders_stock_test` is created automatically the first time the container
+starts.
 
 ## Run
 
