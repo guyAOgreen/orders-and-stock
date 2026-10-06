@@ -70,7 +70,8 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   reports `status` (`accepted`) and `stock_status` (`pending`/`applied`)
   as separate fields. Unknown SKU is 422 with a string `detail`; unknown
   order is 404. `order_ref` is restricted to URL-unreserved characters
-  (letters, digits, `.`, `_`, `~`, `-`), at most 128 long and not only dots. Repeated SKUs in one request are merged into one line. The
+  (letters, digits, `.`, `_`, `~`, `-`), at most 128 long and not only dots;
+  `sku` and `customer_id` are at most 128 characters and may not contain NUL. Repeated SKUs in one request are merged into one line. The
   service function owns commit and rollback; the request-scoped session
   dependency owns only the session's lifetime.
 - Task 2 Option B: the daily report.

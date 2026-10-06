@@ -209,6 +209,10 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         _order_request(order_ref="w" * 129),
         _order_request(order_ref="."),
         _order_request(order_ref=".."),
+        _order_request(items=[{"sku": "BAN\x00001", "qty": 1}]),
+        _order_request(customer_id="cust\x0042"),
+        _order_request(items=[{"sku": "s" * 129, "qty": 1}]),
+        _order_request(customer_id="c" * 129),
         {"customer_id": "cust-42", "items": [{"sku": "BAN-001", "qty": 1}]},
     ],
     ids=[
@@ -222,6 +226,10 @@ def test_unknown_order_is_not_found(client: TestClient) -> None:
         "order-ref-too-long",
         "dot-order-ref",
         "dot-dot-order-ref",
+        "nul-in-sku",
+        "nul-in-customer-id",
+        "sku-too-long",
+        "customer-id-too-long",
         "missing-order-ref",
     ],
 )

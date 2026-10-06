@@ -18,7 +18,8 @@ StockStatus = Literal["pending", "applied"]
 # URL "unreserved" characters (RFC 3986), so an order_ref needs no encoding and
 # round-trips through the GET path, where a slash would split the segment.
 ORDER_REF_PATTERN = r"^[A-Za-z0-9._~-]+$"
-ORDER_REF_MAX_LENGTH = 128
+# Bounds the identifiers stored in text columns.
+IDENTIFIER_MAX_LENGTH = 128
 
 
 def _not_a_dot_segment(order_ref: str) -> str:
@@ -29,19 +30,35 @@ def _not_a_dot_segment(order_ref: str) -> str:
     return order_ref
 
 
+def _no_nul(value: str) -> str:
+    # PostgreSQL text cannot hold NUL; psycopg rejects it before the query
+    # runs, which would surface as a 500 rather than a validation error.
+    if "\x00" in value:
+        raise ValueError("must not contain NUL characters")
+    return value
+
+
+# An identifier looked up in or stored to a PostgreSQL text column.
+Identifier = Annotated[
+    str,
+    Field(min_length=1, max_length=IDENTIFIER_MAX_LENGTH),
+    AfterValidator(_no_nul),
+]
+
+
 class OrderItemRequest(BaseModel):
-    sku: str = Field(min_length=1)
+    sku: Identifier
     qty: int = Field(gt=0, le=PG_INTEGER_MAX)
 
 
 class OrderRequest(BaseModel):
     order_ref: Annotated[str, AfterValidator(_not_a_dot_segment)] = Field(
         min_length=1,
-        max_length=ORDER_REF_MAX_LENGTH,
+        max_length=IDENTIFIER_MAX_LENGTH,
         pattern=ORDER_REF_PATTERN,
         description="Client idempotency key: letters, digits, `.`, `_`, `~`, `-`",
     )
-    customer_id: str = Field(min_length=1)
+    customer_id: Identifier
     items: list[OrderItemRequest] = Field(min_length=1)
 
 

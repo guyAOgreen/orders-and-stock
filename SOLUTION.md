@@ -286,7 +286,9 @@ status fields, `status` and `stock_status`.
   and `.` or `..` are path segments that URL normalisation removes; the
   alternative, a path-converter route that swallows slashes, still leaves
   other characters to encode. Clients that use arbitrary keys would need to
-  map them.
+  map them. `sku` and `customer_id` are free text up to 128 characters but
+  may not contain NUL, which PostgreSQL text cannot hold and psycopg rejects
+  client-side; without the check that request would be a 500, not a 422.
 - **Wiring.** The application lifespan creates the engine and session
   factory and disposes the engine on shutdown. A dependency yields one
   `Session` per request and owns only its lifetime. The service function
