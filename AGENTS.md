@@ -63,7 +63,8 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   non-negative constraint, stock may go negative.
 - Orders API: `POST /orders` returns 201 for a new order and 200 with the
   existing order for a repeated `order_ref`; idempotency is by `order_ref`
-  alone and the repeat's payload is not compared. `GET /orders/{order_ref}`
+  alone and a well-formed repeat's payload is neither validated against the
+  catalogue nor compared. `GET /orders/{order_ref}`
   reports `status` (`accepted`) and `stock_status` (`pending`/`applied`)
   as separate fields. Unknown SKU is 422 with a string `detail`; unknown
   order is 404. Repeated SKUs in one request are merged into one line. The

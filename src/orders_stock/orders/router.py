@@ -29,8 +29,10 @@ router = APIRouter(prefix="/orders", tags=["orders"])
             "returned unchanged and nothing is written.",
         },
         status.HTTP_422_UNPROCESSABLE_CONTENT: {
-            "description": "Invalid request body, or an unknown SKU "
-            '(`{"detail": "Unknown SKU(s): ..."}`).',
+            "description": "Invalid request body (Pydantic's list of field "
+            "errors in `detail`), or a request the catalogue cannot satisfy: "
+            "an unknown SKU or a quantity or total beyond the database's "
+            'range, with a string `detail` such as `"Unknown SKU(s): ..."`.',
         },
     },
 )

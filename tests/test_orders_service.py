@@ -68,7 +68,8 @@ def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[list
                 text(
                     "SELECT count(*) FROM pg_stat_activity "
                     "WHERE datname = current_database() "
-                    "AND wait_event_type = 'Lock'"
+                    "AND wait_event_type = 'Lock' "
+                    "AND query LIKE 'INSERT INTO orders%'"
                 )
             ).scalar_one()
         return bool(waiting)
@@ -76,6 +77,8 @@ def hold_first_order_insert_until_second_blocks(engine: Engine) -> Iterator[list
     def hold(conn: Any, cursor: Any, statement: str, *args: Any) -> None:
         if "INSERT INTO orders" not in statement or first_arrived.is_set():
             return
+        # Check-then-set is safe: the second insert is blocked inside
+        # PostgreSQL until the first commits, so its hook cannot run yet.
         first_arrived.set()
         deadline = time.monotonic() + LOCK_WAIT_TIMEOUT_SECONDS
         while not _another_backend_is_waiting_on_a_lock():

@@ -162,6 +162,16 @@ def test_repeated_order_ref_with_different_payload_returns_original_order(
     assert repeat.json() == original
 
 
+def test_structurally_invalid_repeat_is_still_rejected(
+    client: TestClient, products: None
+) -> None:
+    client.post("/orders", json=_order_request())
+
+    repeat = client.post("/orders", json=_order_request(items=[]))
+
+    assert repeat.status_code == 422
+
+
 def test_unknown_sku_is_rejected_and_nothing_is_written(
     client: TestClient, products: None, session_factory: sessionmaker[Session]
 ) -> None:

@@ -54,8 +54,8 @@ def accept_order(session: Session, request: OrderRequest) -> tuple[OrderDetails,
     """Accept an order idempotently.
 
     Returns the order's details and whether this call created it. A repeated
-    ``order_ref`` returns the existing order and writes nothing; the payload of
-    the repeat is not validated or compared.
+    ``order_ref`` returns the existing order and writes nothing; the repeat's
+    payload is neither validated against the catalogue nor compared.
     """
     existing = get_order(session, request.order_ref)
     if existing is not None:
@@ -133,7 +133,7 @@ def get_order(session: Session, order_ref: str) -> OrderDetails | None:
             OrderLine(
                 sku=item.sku, qty=item.quantity, unit_price_cents=item.unit_price_cents
             )
-            for item in sorted(order.items, key=lambda item: item.id)
+            for item in order.items
         ],
         total_cents=order.total_cents,
         stock_status="applied" if work_status == "processed" else "pending",

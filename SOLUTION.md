@@ -23,8 +23,9 @@ Orders tables.
 
 ### Accepting an order (one transaction)
 
-1. Look up the `order_ref`. If an order exists, return it: a repeat is not
-   validated or compared against the stored order.
+1. Look up the `order_ref`. If an order exists, return it: a structurally
+   valid repeat is not validated against the catalogue or compared with the
+   stored order.
 2. Validate the SKUs and read their current prices; reject unknown SKUs.
 3. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING`.
 4. If the row was inserted: insert the order items with the unit price in
@@ -243,9 +244,11 @@ status fields, `status` and `stock_status`.
   a success, not an error. "The same body" means the stored order details;
   `stock_status` may legitimately have moved from `pending` to `applied`
   between two submissions.
-- **Idempotency is keyed by `order_ref` alone.** The repeat's payload is not
-  validated or compared, so a repeat with different items, or with an
-  unknown SKU, still returns the original order. Detecting a changed payload
+- **Idempotency is keyed by `order_ref` alone.** Pydantic still rejects a
+  structurally invalid repeat (no items, `qty` below 1) with 422, but a
+  well-formed repeat is not validated against the catalogue or compared
+  with the stored order, so a repeat with different items, or with an
+  unknown SKU, returns the original order. Detecting a changed payload
   would need a comparison rule and a response for the mismatch, which the
   brief does not ask for.
 - **Two status fields.** `status` is always `accepted` for a stored order
@@ -342,8 +345,8 @@ per SKU and current stock per SKU.
 - Orders are validated for structure, positive quantities and known SKUs;
   business validation beyond that (customer existence, order size limits)
   is out of scope.
-- A repeated `order_ref` is the same order. Payload differences between
-  repeats are not detected.
+- A well-formed repeat of an `order_ref` is the same order. Payload
+  differences between repeats are not detected.
 - Monetary values are integer cents, as in the brief's example data.
 - Report days are calendar days in UTC by acceptance time. Revenue is the
   sum of accepted order totals; duplicates are excluded because they are
