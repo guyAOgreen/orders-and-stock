@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: orders_stock
+      POSTGRES_PASSWORD: orders_stock
+      POSTGRES_DB: orders_stock
+    ports:
+      # Host port 5433 avoids clashing with a locally installed PostgreSQL on 5432.
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Creates the test database alongside the development one on first start.
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders_stock -d orders_stock"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+volumes:
+  postgres-data:
