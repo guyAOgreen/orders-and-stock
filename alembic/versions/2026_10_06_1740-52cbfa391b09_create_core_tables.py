@@ -69,10 +69,7 @@ def upgrade() -> None:
             name=op.f("ck_order_items_unit_price_cents_non_negative"),
         ),
         sa.ForeignKeyConstraint(
-            ["order_id"],
-            ["orders.id"],
-            name=op.f("fk_order_items_order_id_orders"),
-            ondelete="CASCADE",
+            ["order_id"], ["orders.id"], name=op.f("fk_order_items_order_id_orders")
         ),
         sa.ForeignKeyConstraint(
             ["sku"], ["products.sku"], name=op.f("fk_order_items_sku_products")
@@ -113,7 +110,7 @@ def upgrade() -> None:
     )
     # The worker claims the oldest pending row; processed rows only accumulate.
     op.create_index(
-        "ix_stock_work_pending_created_at",
+        op.f("ix_stock_work_pending_created_at"),
         "stock_work",
         ["created_at"],
         postgresql_where=sa.text("status = 'pending'"),

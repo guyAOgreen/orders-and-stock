@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import Engine, inspect, text
+from sqlalchemy import Engine, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -70,6 +70,8 @@ def _committed_order(session_factory: sessionmaker[Session]) -> int:
 def test_migrations_round_trip_from_an_empty_database(
     engine: Engine, alembic_config: Config
 ) -> None:
+    # Rebuilds the shared test database; relies on pytest running tests
+    # sequentially, so do not run this file under pytest-xdist.
     command.downgrade(alembic_config, "base")
     assert _table_names(engine).isdisjoint(DOMAIN_TABLES)
 
@@ -108,6 +110,18 @@ def test_work_row_for_unknown_order_is_rejected(
     )
 
 
+def test_order_item_for_unknown_order_is_rejected(
+    session_factory: sessionmaker[Session],
+) -> None:
+    _commit(session_factory, _product())
+
+    _commit_rejected(
+        session_factory,
+        "fk_order_items_order_id_orders",
+        OrderItem(order_id=999_999, sku="BAN-001", quantity=1, unit_price_cents=1),
+    )
+
+
 def test_order_item_for_unknown_sku_is_rejected(
     session_factory: sessionmaker[Session],
 ) -> None:
@@ -135,6 +149,26 @@ def test_new_work_row_is_pending_with_timezone_aware_timestamps(
         assert work.processed_at is None
         assert work.created_at.tzinfo is not None
         assert work.items == [{"sku": "BAN-001", "qty": 2}]
+
+
+def test_work_status_defaults_to_pending_in_the_database(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Issue 6 inserts the work row with an explicit statement, so the default
+    # must hold in PostgreSQL, not only in the ORM mapping.
+    order_id = _committed_order(session_factory)
+
+    with session_factory() as session:
+        session.execute(
+            text("INSERT INTO stock_work (order_id, items) VALUES (:order_id, '[]')"),
+            {"order_id": order_id},
+        )
+        session.commit()
+
+        work = session.execute(
+            select(StockWork).where(StockWork.order_id == order_id)
+        ).scalar_one()
+        assert work.status == "pending"
 
 
 def test_order_acceptance_timestamp_is_timezone_aware(

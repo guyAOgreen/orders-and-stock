@@ -65,8 +65,9 @@ Keep these three groups separate. Do not treat a proposal as a decision.
 - Schema: products are keyed by SKU; money is integer cents and timestamps
   are `timestamptz`. The stock-work row has a unique foreign key to the
   order and carries the SKU quantities as a JSONB array of `{sku, qty}`
-  objects; the schema checks only that it is an array, Orders builds a valid
-  payload and the worker consumes it. All mapped models live in
+  objects with one entry per SKU; the schema checks only that it is an
+  array, Orders builds the payload (summing repeated SKUs) and the worker
+  decrements each entry once. All mapped models live in
   `src/orders_stock/models.py`; constraint names follow the naming
   convention on `Base`.
 - uv with Python 3.12; Ruff for formatting and linting; mypy in strict mode;

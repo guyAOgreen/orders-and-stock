@@ -188,8 +188,9 @@ migrations and tests can refer to them.
   `{"sku", "qty"}` objects. The work row is a message the worker consumes
   whole: one insert at acceptance, one claim in the worker, and no second
   table mirroring `order_items`. The schema guarantees only that the value
-  is an array. Orders builds a valid payload at acceptance (repeated SKUs in
-  one order must all count) and the worker consumes that contract.
+  is an array. Orders builds a valid payload at acceptance with one entry
+  per SKU, summing the quantities of any SKU repeated in the request, and the
+  worker decrements each entry once.
   Alternative: child rows with a foreign key to `products`, which would
   validate each SKU in the database and let the worker decrement in one
   joined update. Not chosen because the API already validates SKUs against

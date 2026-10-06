@@ -81,9 +81,7 @@ class OrderItem(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
-    order_id: Mapped[int] = mapped_column(
-        ForeignKey("orders.id", ondelete="CASCADE"), index=True
-    )
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
     sku: Mapped[str] = mapped_column(ForeignKey("products.sku"))
     quantity: Mapped[int] = mapped_column(Integer)
     unit_price_cents: Mapped[int] = mapped_column(Integer)
@@ -94,9 +92,11 @@ class OrderItem(Base):
 class StockWork(Base):
     """Pending stock work for one order: the contract between Orders and Stock.
 
-    ``items`` is a JSON array of ``{"sku": str, "qty": int}`` objects. The
-    schema guarantees only that it is an array; the Orders component builds a
-    valid payload at acceptance and the stock worker consumes it.
+    ``items`` is a JSON array of ``{"sku": str, "qty": int}`` objects with
+    one entry per SKU; Orders sums the quantities of a SKU repeated in one
+    request. The schema guarantees only that it is an array; the Orders
+    component builds a valid payload at acceptance and the stock worker
+    decrements each entry once.
     """
 
     __tablename__ = "stock_work"
