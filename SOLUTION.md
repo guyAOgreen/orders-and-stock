@@ -222,10 +222,16 @@ command so SIGTERM reaches the process), a one-shot `migrate` job that `api`
 and `worker` wait for, so migrations run in one place rather than in each
 process, and a `seed-burst` service behind a profile that depends on `api`
 alone, so running it never restarts a deliberately stopped worker.
-Containers get a `DATABASE_URL` built from the `POSTGRES_*` values with the
-service address; `.env` itself is not passed through. There is no restart
-policy, so a worker that exits on a failed startup check stays down until
-started again.
+The worker service has a 30 second stop grace period rather than the Compose
+default of 10, because its SIGTERM handling waits for a statement blocked in
+PostgreSQL; a kill after that is still safe, since the uncommitted
+transaction rolls back and the work row stays pending, but the attempt is
+redone rather than finished. Containers get a `DATABASE_URL` built from the
+`POSTGRES_*` values with the service address by plain substitution, so those
+values must avoid URL-reserved characters, which is documented rather than
+engineered around for local-only credentials; `.env` itself is not passed
+through. There is no restart policy, so a worker that exits on a failed
+startup check stays down until started again.
 
 ## Testing evidence
 

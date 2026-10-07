@@ -37,8 +37,10 @@ uv run alembic upgrade head           # applies the schema to the development da
 
 Both the container and the application read their credentials from `.env`,
 so copy it before starting Compose. The values in `.env.example` are for local
-development only. PostgreSQL is published on host port 5433 rather than 5432
-so it does not clash with a locally installed server. The test database
+development only; keep them to letters, digits, `_` and `-`, because they are
+substituted verbatim into the connection URLs. PostgreSQL is published on
+host port 5433 rather than 5432 so it does not clash with a locally installed
+server. The test database
 `orders_stock_test` is created automatically the first time the container
 starts.
 
@@ -339,7 +341,12 @@ running and re-runs the `migrate` job, which is a no-op once the schema is
 at head. It never starts the worker, so the interruption step is safe.
 `docker compose stop worker` delivers SIGTERM to the worker process itself,
 because the image runs each command in exec form with no shell in between,
-so the graceful shutdown applies exactly as it does natively. The API keeps
+so the graceful shutdown applies exactly as it does natively. The worker
+service allows 30 seconds for that, instead of the 10 second Compose
+default, because a statement blocked inside PostgreSQL is not interrupted.
+If the worker is still inside a transaction after that, Compose kills it:
+PostgreSQL rolls the attempt back, the work row stays pending and the
+restarted worker retries it, so stock is never applied twice. The API keeps
 serving while the worker is down. After a code change,
 `docker compose up --build -d --wait` rebuilds the image and recreates the
 changed services; `docker compose down` stops and removes the containers.
