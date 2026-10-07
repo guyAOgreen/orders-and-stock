@@ -136,8 +136,10 @@ web-100050 -> 201 new
 Submitted 8 orders: 6 new, 2 duplicates
 ```
 
-The worker's terminal logs `applied stock for order_id=...` six times, one
-per distinct order, oldest first.
+The command returns as soon as the orders are accepted; the worker applies
+their stock separately, polling once a second. Before going on, wait until
+the worker's terminal has logged `applied stock for order_id=...` six times,
+one per distinct order, oldest first. That usually takes a second or two.
 
 **4. Read an order.** Prices were copied onto the items at acceptance and the
 stock status has moved from `pending` to `applied`:
@@ -224,8 +226,8 @@ The pending work is in PostgreSQL, so it survives any restart.
 
 **9. Recover.** Start the worker again with `uv run orders-stock-worker`. It
 logs `applied stock for order_id=...` for each of the six backlog orders,
-oldest first. Afterwards `demo2-100045` reports `"stock_status":"applied"`
-and the figures are:
+oldest first. Once all six lines have appeared, `demo2-100045` reports
+`"stock_status":"applied"` and the figures are:
 
 | | After step 6 | After step 9 |
 |---|---|---|
@@ -291,10 +293,11 @@ product (see step 6 for a body). `total_orders` and `revenue_cents` count
 stored orders only, so duplicates never appear, and revenue uses the prices
 in effect when each order was accepted. `units_sold` lists only SKUs sold
 that day. `current_stock` is live, not a per-day snapshot: every product's
-level as of `generated_at`, which still lags any accepted orders the worker
-has not applied. All figures come from one database snapshot. A day with no
-orders returns zeros, an empty `units_sold` and the current stock. A missing
-or malformed `date` is `422`.
+level in the same database snapshot as the other figures, which still lags
+any accepted orders the worker has not applied. `generated_at` is the start
+time of the transaction that took that snapshot. A day with no orders
+returns zeros, an empty `units_sold` and the current stock. A missing or
+malformed `date` is `422`.
 
 ## Run in containers
 
@@ -330,7 +333,7 @@ commands in place of the native ones. Its output and figures are the same.
 |---|---|---|
 | 1. Empty database and migrate | `docker compose down -v`, `up -d --wait postgres`, `alembic upgrade head` | `docker compose down -v` then `docker compose up --build -d --wait` |
 | 2. Start the API and worker | two `uv run` processes | started by `up`; `docker compose logs -f api worker` follows both |
-| 3. Seed and burst | `uv run orders-stock-seed-burst` | `docker compose run --rm seed-burst` |
+| 3. Seed and burst | `uv run orders-stock-seed-burst` | `docker compose run --rm seed-burst`, then wait for the six `applied stock` lines in `docker compose logs worker` |
 | 7. Replay | same command again | same command again |
 | 8. Stop the worker; fresh batch | Ctrl+C; `uv run orders-stock-seed-burst --burst-only --batch demo2` | `docker compose stop worker`; `docker compose run --rm seed-burst --burst-only --batch demo2` |
 | 9. Restart the worker | `uv run orders-stock-worker` | `docker compose start worker` |

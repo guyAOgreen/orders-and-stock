@@ -50,10 +50,13 @@ into validation as a new order: PostgreSQL makes the competing insert wait
 for the original's transaction. If the original commits, the competitor sees
 the conflict and is answered as a duplicate. If the original rolls back, for
 example on an unknown SKU, the competing insert proceeds and that request
-becomes the order. Either way one order exists per `order_ref`. Validating
-first would still let a racing repeat past the constraint. The cost is one
-`UPDATE` of the total per accepted order and a rolled-back row per rejected
-request.
+becomes the order. Either way one order exists per `order_ref`. The
+constraint would hold with validation first too; what inserting first buys
+is a timing-independent response. A repeat with an unknown SKU that races
+its uncommitted original is answered with the original rather than
+rejected, because PostgreSQL resolves the conflict before the catalogue is
+consulted. The cost is one `UPDATE` of the total per accepted order and a
+rolled-back row per rejected request.
 
 Idempotency is keyed by `order_ref` alone. A structurally invalid repeat is
 still a `422`, but a well-formed repeat is neither validated against the
@@ -203,9 +206,14 @@ output is reproducible and a rerun is itself the duplicate demonstration.
 Requests are sequential; concurrent duplicates are proved by tests. httpx2
 is the runtime client because the FastAPI test client is built on it.
 
-SQLAlchemy 2.x (2.0-style) over Psycopg 3 maps the four tables and owns
-sessions, and Alembic migrations are the only way the schema changes. The
-three concurrency-critical statements, the `ON CONFLICT` insert, the
+SQLAlchemy 2.x (2.0-style) over Psycopg 3 maps the four tables, and its
+sessions give one place to own each transaction; Alembic reproduces the
+schema from an empty database and is the only way it changes. Plain Psycopg
+with parameterised SQL and SQL-file migrations would have served this few
+queries, and was passed over because the session and migration structure is
+worth having as the schema grows; the trade-off is that the session's flush
+and loading behaviour must be understood and tested. The three
+concurrency-critical statements, the `ON CONFLICT` insert, the
 `SKIP LOCKED` claim and the stock decrement, are written explicitly rather
 than left to ORM behaviour, so what the tests prove is visible in the code.
 Pydantic API schemas stay separate from the mapped models. uv manages
