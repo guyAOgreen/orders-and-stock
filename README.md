@@ -100,7 +100,8 @@ One ordered demonstration from an empty database, covering the successful
 flow, the duplicate path and the interruption with catch-up. The figures
 below assume this sequence and the shipped catalogue, with no other orders.
 The example date `2026-10-07` stands for the UTC date on which step 3 runs,
-and timestamps in the response bodies are illustrative.
+and timestamps in the response bodies are illustrative. Run steps 3 to 9
+within one UTC day, or the report in step 9 splits across two dates.
 
 **1. Start from an empty database.** This deletes every order, product and
 stock level in the development and test databases:
@@ -200,9 +201,9 @@ web-100050 -> 200 duplicate
 Submitted 8 orders: 0 new, 8 duplicates
 ```
 
-The worker logs nothing, and steps 5 and 6 return exactly the same bodies:
-no product was duplicated, no stock level moved and no `order_ref` was
-counted twice.
+The worker logs nothing, and steps 5 and 6 return the same figures (only
+`generated_at` differs): no product was duplicated, no stock level moved and
+no `order_ref` was counted twice.
 
 **8. Interrupt the stock capability.** Stop the worker with Ctrl+C in its
 terminal; it logs `stock worker stopped` and exits 0. The API keeps
@@ -237,9 +238,9 @@ with the existing order and leaves every figure where it is.
 ## API reference
 
 The interactive documentation at `/docs` lists every route. The examples
-here are **not part of the walkthrough**: the `POST` below creates a
-seventh order, adding 2,997 cents to that day's report and taking two more
-bananas and one more milk from stock once applied.
+here are **not part of the walkthrough**: the `POST` below creates one more
+order, adding 2,997 cents to that day's report and taking two more bananas
+and one more milk from stock once applied.
 
 ### Orders
 
@@ -268,12 +269,14 @@ rejected with `422` and `{"detail":"Unknown SKU(s): NOPE-000"}`; an unknown
 `order_ref` on `GET` is `404`. An `order_ref` may contain letters, digits,
 `.`, `_`, `~` and `-` (up to 128 characters, not only dots) so it can appear
 unencoded in the `GET` path. A SKU repeated within one request is merged
-into one line.
+into one line; a quantity or total too large for its database column is a
+`422` rather than a database error.
 
 ### Stock
 
 `GET /stock?sku=BAN-001` returns `{"sku":"BAN-001","name":"Bananas 1kg","stock":491}`,
-the live level. An unknown SKU is `404` with `{"detail":"Unknown SKU"}`; a
+the live level (491 is the value after walkthrough step 6). An unknown SKU
+is `404` with `{"detail":"Unknown SKU"}`; a
 missing or empty `sku` is `422`. The SKU is a query parameter rather than a
 path segment so that any catalogue SKU, including one containing `/` or
 `.`, can be read.

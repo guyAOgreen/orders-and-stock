@@ -64,7 +64,8 @@ response that the brief does not ask for.
 
 Also part of the contract: a SKU repeated in one request is merged into one
 line; `status` is always `accepted` for a stored order while `stock_status`
-is `pending` until the worker processes the row, then `applied`; `order_ref`
+is `pending` until the worker processes the row, then `applied` (the row
+itself says `processed`; the API describes the effect on stock); `order_ref`
 is limited to URL-unreserved characters so every accepted ref appears
 unencoded in `GET /orders/{order_ref}`. The service function owns the
 transaction, committing a success and rolling back a conflict or failure;
@@ -202,10 +203,15 @@ output is reproducible and a rerun is itself the duplicate demonstration.
 Requests are sequential; concurrent duplicates are proved by tests. httpx2
 is the runtime client because the FastAPI test client is built on it.
 
-uv manages Python 3.12, the virtual environment and the lockfile; Ruff
-formats and lints; mypy runs in strict mode; pydantic-settings reads typed
-settings from the environment and a `.env` file; Alembic migrations are the
-only way the schema changes. Engines use a short connect timeout so a
+SQLAlchemy 2.x (2.0-style) over Psycopg 3 maps the four tables and owns
+sessions, and Alembic migrations are the only way the schema changes. The
+three concurrency-critical statements, the `ON CONFLICT` insert, the
+`SKIP LOCKED` claim and the stock decrement, are written explicitly rather
+than left to ORM behaviour, so what the tests prove is visible in the code.
+Pydantic API schemas stay separate from the mapped models. uv manages
+Python 3.12, the virtual environment and the lockfile; Ruff formats and
+lints; mypy runs in strict mode; pydantic-settings reads typed settings from
+the environment and a `.env` file. Engines use a short connect timeout so a
 process fails fast when PostgreSQL is unreachable.
 
 PostgreSQL 17 runs in Docker Compose on host port 5433 to avoid a locally
@@ -213,11 +219,13 @@ installed server. The application runs natively for development and tests,
 and the same Compose file can run everything in containers: one image for
 all roles (two stages, `uv sync --locked --no-dev`, non-root, exec-form
 command so SIGTERM reaches the process), a one-shot `migrate` job that `api`
-and `worker` wait for, so migrations run exactly once, and a `seed-burst`
-service behind a profile that depends on `api` alone, so running it never
-restarts a deliberately stopped worker. Containers get a `DATABASE_URL`
-built from the `POSTGRES_*` values with the service address; `.env` itself
-is not passed through.
+and `worker` wait for, so migrations run in one place rather than in each
+process, and a `seed-burst` service behind a profile that depends on `api`
+alone, so running it never restarts a deliberately stopped worker.
+Containers get a `DATABASE_URL` built from the `POSTGRES_*` values with the
+service address; `.env` itself is not passed through. There is no restart
+policy, so a worker that exits on a failed startup check stays down until
+started again.
 
 ## Testing evidence
 
@@ -265,7 +273,9 @@ demonstration is manual.
   worker always applies the decrement and there is no non-negative
   constraint, so a shortage yields a negative level rather than a
   rejection. The brief limits the unhappy paths to two, and rejecting on
-  shortage would add a third order lifecycle.
+  shortage would add a third order lifecycle. Checking in the worker and
+  rejecting on shortage is the natural next step; backorders or reservation
+  before confirmation are the heavier alternatives.
 - **Stock is eventually consistent.** It lags acceptance by the polling
   interval, the backlog and worker availability, and the report's current
   stock lags the same way.
