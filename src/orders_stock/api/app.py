@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from orders_stock.config import Settings, get_settings
 from orders_stock.db import make_engine, make_session_factory
 from orders_stock.orders.router import router as orders_router
+from orders_stock.stock.router import router as stock_router
 
 
 @asynccontextmanager
@@ -30,4 +31,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(orders_router)
+    app.include_router(stock_router)
     return app

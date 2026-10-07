@@ -306,6 +306,56 @@ status fields, `status` and `stock_status`.
   session's lifetime ends. The Orders module reads the work row's status
   but imports nothing from the Stock module.
 
+### Stock worker and stock endpoint
+
+`orders-stock-worker` polls the work table and applies each row as described
+under Applying stock; `GET /stock?sku=...` reads a product's current level.
+
+- **One row per transaction, no batching.** The loop claims the oldest
+  pending row with `SELECT ... FOR UPDATE SKIP LOCKED`, decrements each SKU,
+  marks the row processed and commits, with a fresh session per attempt that
+  is closed before any wait. While rows are pending it goes straight on to
+  the next; when the queue is empty it waits `WORKER_POLL_INTERVAL_SECONDS`
+  (default 1 second, validated positive and finite) before polling again.
+  One row per transaction keeps a rollback confined to one order and is
+  simple and sufficient for this workload.
+- **Atomic decrement.** Each SKU is applied with one
+  `UPDATE products SET stock = stock - qty` expression rather than a
+  read-modify-write, so concurrent workers applying orders for the same SKU
+  serialise on the row lock and each applies its own quantity. The SKUs of
+  one order are decremented in sorted order so that workers applying
+  overlapping orders take product row locks in a consistent order, a
+  precaution against lock-ordering deadlocks.
+- **Retry is minimal.** A failed attempt is logged with the work-row id, the
+  order id and the traceback; the transaction rolls back, so the row stays
+  pending, and the worker waits one interval before polling again. There is
+  no attempt counter and no failed state. Limitation: a row that fails
+  permanently, for example a malformed payload or a decrement that would
+  take the `integer` stock column out of range, is reclaimed on every poll
+  because claims are oldest-first, so it stalls a single worker
+  indefinitely; with several workers the others skip it only while one has
+  it locked, so throughput degrades rather than stops. The next step would
+  be an attempts column and a quarantined status, and a decision on whether
+  the API exposes that state.
+- **Shutdown.** SIGINT or SIGTERM sets a flag that the loop checks before
+  each attempt and again once a row has been claimed. That second check is
+  the boundary: a claim that finds the flag set is released unapplied, and
+  an order past it commits or rolls back whole. Then the process exits 0.
+  The flag does not
+  interrupt a statement already waiting inside PostgreSQL, for example on a
+  row lock, so shutdown waits for the current database operation; the
+  polling interval bounds idle wake-up, not shutdown. A worker killed
+  outright leaves its open transaction for PostgreSQL to roll back, which is
+  the recovery table above.
+- **`GET /stock?sku=...`** returns `{sku, name, stock}`, 404 for an unknown
+  SKU and 422 when `sku` is missing, empty, longer than 128 characters or
+  contains NUL. The SKU is a query parameter rather than a path segment:
+  catalogue SKUs are free text, and one containing `/` or `.` could not be
+  read from a path. The `order_ref` route needed a character restriction to
+  stay readable; the Stock contract avoids imposing one. The Stock module
+  keeps its own copy of the identifier rules rather than importing them from
+  Orders, so the two contracts can evolve apart.
+
 ### Task 2: Option B, daily report
 
 One endpoint returning, for a calendar day, total orders, revenue, units sold
@@ -389,3 +439,6 @@ per SKU and current stock per SKU.
 - Both processes depend on one PostgreSQL database. A worker crash does not
   stop intake, but a database outage stops both.
 - Insufficient stock yields a negative level rather than a rejection.
+- A work row that fails permanently is retried on every poll and stalls a
+  single worker; see Stock worker and stock endpoint.
+- Worker shutdown waits for the current database operation to finish.

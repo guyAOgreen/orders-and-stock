@@ -74,6 +74,20 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   `sku` and `customer_id` are at most 128 characters and may not contain NUL. Repeated SKUs in one request are merged into one line. The
   service function owns commit and rollback; the request-scoped session
   dependency owns only the session's lifetime.
+- Stock worker: one work row per transaction, no batching, claimed
+  oldest-first with `FOR UPDATE SKIP LOCKED`; each SKU is decremented with an
+  atomic `UPDATE ... SET stock = stock - qty`, in sorted SKU order; a fresh
+  session per attempt. `WORKER_POLL_INTERVAL_SECONDS` (default 1.0, positive
+  and finite) is the wait when the queue is empty or an attempt fails. Retry
+  is minimal: a failed row stays pending and is retried indefinitely, with
+  no attempt counter or failed state. SIGINT/SIGTERM stop the loop between
+  transactions, with a second check after the claim: a claim that finds the
+  flag set is released unapplied, an order past it is finished whole; a
+  statement already waiting in PostgreSQL is not interrupted.
+- Stock API: `GET /stock?sku=...` returns `{sku, name, stock}`; 404 for an
+  unknown SKU; 422 for a missing, empty, over-long or NUL-containing `sku`.
+  The SKU is a query parameter so free-text SKUs stay readable. The Stock
+  module keeps its own identifier rules rather than importing Orders'.
 - Task 2 Option B: the daily report.
 - Schema: products are keyed by SKU; money is integer cents and timestamps
   are `timestamptz`. The stock-work row has a unique foreign key to the

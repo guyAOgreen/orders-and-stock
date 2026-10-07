@@ -51,3 +51,21 @@ def test_settings_default_api_bind_address(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert settings.api_host == "127.0.0.1"
     assert settings.api_port == 9001
+
+
+def test_settings_default_worker_poll_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
+    monkeypatch.delenv("WORKER_POLL_INTERVAL_SECONDS", raising=False)
+
+    assert Settings(_env_file=None).worker_poll_interval_seconds == 1.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "inf", "nan", "soon"])
+def test_settings_reject_non_positive_or_non_finite_poll_interval(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@db:5432/app")
+    monkeypatch.setenv("WORKER_POLL_INTERVAL_SECONDS", value)
+
+    with pytest.raises(ValidationError, match="worker_poll_interval_seconds"):
+        Settings(_env_file=None)
