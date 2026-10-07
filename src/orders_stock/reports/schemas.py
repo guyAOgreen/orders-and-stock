@@ -29,8 +29,9 @@ class DailyReportResponse(BaseModel):
         description="Units per SKU across that day's orders; only SKUs with sales"
     )
     current_stock: list[StockLevel] = Field(
-        description="Every product's stock level as of generated_at, not a per-day "
-        "snapshot; may still lag accepted orders the worker has not applied"
+        description="Every product's stock level in the same database snapshot as "
+        "the other figures, not a per-day snapshot; may still lag accepted orders "
+        "the worker has not applied"
     )
     generated_at: dt.datetime = Field(
         description="Start time of the report's database transaction, which "
