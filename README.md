@@ -140,11 +140,11 @@ curl -s 'http://127.0.0.1:8000/stock?sku=BAN-001'
 ```
 
 ```
-{"sku":"BAN-001","name":"Bananas 1kg","stock":489}
+{"sku":"BAN-001","name":"Bananas 1kg","stock":491}
 ```
 
-That is the seeded level of 500 less the 11 bananas in the seed/burst
-orders, once the worker has applied them; while they are pending it is
+That is the seeded level of 500 less the 9 bananas across the six distinct
+seed/burst orders, once the worker has applied them; while they are pending it is
 still 500.
 
 An unknown SKU is `404` with `{"detail":"Unknown SKU"}`; a missing or empty
@@ -172,7 +172,7 @@ PostgreSQL and the API running:
 4. **Restart the worker:** `uv run orders-stock-worker`. It logs
    `applied stock for order_id=...` for each backlog order, oldest first.
 5. **Observe the catch-up.** The orders now report `"stock_status":"applied"`
-   and `GET /stock?sku=BAN-001` has dropped by the 11 bananas in the batch.
+   and `GET /stock?sku=BAN-001` has dropped by the 9 bananas in the batch.
 
 Submitting the same `order_ref` again at any point returns `200` with the
 existing order and leaves stock untouched, which is the duplicate path.
