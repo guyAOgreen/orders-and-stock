@@ -1,4 +1,20 @@
-# Credentials come from .env (copy .env.example), which Compose reads automatically.
+# Credentials come from .env (copy .env.example). Compose reads that file for
+# the ${...} substitutions below; the containers receive only the variables
+# listed under `environment`, so the native DATABASE_URL never reaches them.
+#
+#   docker compose up -d --wait postgres     native development: database only
+#   docker compose up --build -d --wait      everything in containers
+#   docker compose run --rm seed-burst ...   seed products and submit the burst
+
+x-app: &app
+  image: orders-stock
+  environment: &app-env
+    # The service address, not the host port; the native URL in .env uses localhost:5433.
+    # Plain interpolation, no URL encoding: the POSTGRES_* values must not contain
+    # URL-reserved characters (see .env.example).
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?set in .env}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:?set in .env}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
 services:
   postgres:
     image: postgres:17
@@ -10,6 +26,7 @@ services:
       # Host port 5433 avoids clashing with a locally installed PostgreSQL on 5432.
       - "5433:5432"
     volumes:
+      # Survives `down`; only `down -v` deletes it.
       - postgres-data:/var/lib/postgresql/data
       # Creates the test database alongside the development one on first start.
       - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
@@ -18,6 +35,65 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # One-shot job: runs the migrations once PostgreSQL is healthy, then exits.
+  # The API and worker wait for it, so neither process migrates on its own.
+  migrate:
+    <<: *app
+    # The one service that builds the image; the others reuse it by name.
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    environment:
+      <<: *app-env
+      API_HOST: 0.0.0.0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # The image has no curl; Python's urllib raises on a non-2xx status.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Deliberately not a dependency of anything, so stopping it for the
+  # interruption demo is never undone by another service starting.
+  worker:
+    <<: *app
+    command: ["orders-stock-worker"]
+    environment:
+      <<: *app-env
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-1.0}
+    # SIGTERM lets the worker finish the order in progress; a statement blocked in
+    # PostgreSQL is not interrupted, so allow longer than the 10 s default before
+    # SIGKILL. A kill rolls the attempt back and the work row stays pending.
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Runs only on request: `docker compose run --rm seed-burst [--batch demo2]
+  # [--seed-only|--burst-only]`. The profile keeps `up` from starting it.
+  seed-burst:
+    <<: *app
+    profiles: ["tools"]
+    entrypoint: ["orders-stock-seed-burst", "--api-url", "http://api:8000"]
+    command: []
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   postgres-data:
