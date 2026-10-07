@@ -1,8 +1,8 @@
 # Solution
 
-Design decisions and trade-offs for the orders-and-stock assessment. Each
-decision is recorded here when it is made. Choices that are still open are
-listed in [AGENTS.md](AGENTS.md).
+How the orders-and-stock assessment is built, why, and what it leaves out.
+[README.md](README.md) covers setup, commands and the walkthrough;
+[AGENTS.md](AGENTS.md) records the same decisions as rules for contributors.
 
 ## Architecture
 
@@ -10,171 +10,102 @@ Two processes run from one codebase and share nothing but PostgreSQL:
 
 | Process | Responsibility |
 |---|---|
-| API | Accepts orders; exposes order details and status, current stock for a SKU, and the daily report |
-| Stock worker | Picks up persisted pending stock work and applies stock decrements |
+| API (`orders-stock-api`) | Accepts orders; serves order details and status, current stock for a SKU, and the daily report |
+| Stock worker (`orders-stock-worker`) | Applies persisted pending stock work to product stock levels |
 
-Orders and Stock are separate modules. The API never calls stock code when
-accepting an order; it records a pending stock-work row, and the worker
-applies it later. That row is the contract between the components, and it
-carries the SKU quantities the worker needs, so the worker never reads the
-Orders tables.
+Orders and Stock are separate packages. Accepting an order never calls stock
+code: the API writes a pending `stock_work` row in the same transaction as
+the order, and the worker applies it later. That row is the contract between
+the components. It carries the SKU quantities, so the worker never reads the
+Orders tables; the Orders package reads only the row's status, to report it.
+Tests enforce both import boundaries and the worker's table footprint.
 
-## Correctness and recovery
+The daily report (Task 2, Option B) is a third, read-only package over both
+components' tables. Neither component imports it.
 
-### Accepting an order (one transaction)
+The brief allows a single process with a background thread. Separate
+processes make the interruption demonstration a real stop and restart, with
+no demo-only pause switch, and intake continues while the worker is down.
 
-1. `INSERT` the order with `ON CONFLICT (order_ref) DO NOTHING` and a
-   provisional total of zero, before any validation.
-2. If it conflicted, the `order_ref` already exists, committed or still in
-   flight on another connection: roll back, having written nothing, and
-   return the existing order. A structurally valid repeat is not validated
-   against the catalogue or compared with the stored order.
-3. Otherwise validate the SKUs and read their current prices; an unknown SKU
-   rolls the provisional row back and is rejected.
-4. Store the total, insert the order items with the unit price in effect,
-   insert one pending stock-work row, commit.
+## Accepting an order
 
-The unique constraint on `order_ref` is the sole arbiter of duplicates. Two
-racing requests with the same `order_ref` produce one order, and because the
-insert comes first, a repeat that arrives while its original is still
-uncommitted waits for that transaction and then sees the conflict, instead of
-being validated as a new order. A unique constraint on the work row's order
-id means a repeat can never enqueue a second stock update. Because order,
-items and work commit together, an accepted order can never lack its stock
-work. Unit prices are copied onto the items at acceptance, so later price
-changes do not alter historical totals.
+`POST /orders` is one transaction:
 
-### Applying stock (one transaction per order)
+1. Pydantic validates the request structure before the service runs: at
+   least one item, positive quantities, identifier lengths and the
+   `order_ref` format. Nothing below executes for a malformed request.
+2. Insert the order row with `ON CONFLICT (order_ref) DO NOTHING` and a
+   provisional total of zero, before any catalogue validation.
+3. If no row comes back, the `order_ref` already exists. Roll back, having
+   written nothing, and return the stored order with `200`.
+4. Otherwise read the current prices of the requested SKUs. An unknown SKU
+   rolls the provisional row back and the response is `422`.
+5. Store the total, the items with the unit price in effect, and one pending
+   `stock_work` row. Commit and respond `201`.
 
-1. Claim one pending work row with `SELECT ... FOR UPDATE SKIP LOCKED`.
-2. Decrement stock for each SKU and quantity in that row.
-3. Mark the row processed and commit.
+The unique constraint on `order_ref` is the sole arbiter of duplicates, and
+inserting before validating is what makes it reliable under concurrency. A
+repeat that arrives while its original is still uncommitted does not slip
+into validation as a new order: PostgreSQL makes the competing insert wait
+for the original's transaction. If the original commits, the competitor sees
+the conflict and is answered as a duplicate. If the original rolls back, for
+example on an unknown SKU, the competing insert proceeds and that request
+becomes the order. Either way one order exists per `order_ref`. Validating
+first would still let a racing repeat past the constraint. The cost is one
+`UPDATE` of the total per accepted order and a rolled-back row per rejected
+request.
 
-The decrement and the completion marker commit atomically, which gives the
-recovery guarantees:
+Idempotency is keyed by `order_ref` alone. A structurally invalid repeat is
+still a `422`, but a well-formed repeat is neither validated against the
+catalogue nor compared with the stored order: it receives the original with
+`200`. A `409` was rejected because a repeat is a success, not an error.
+Detecting a changed payload would need a comparison rule and a mismatch
+response that the brief does not ask for.
+
+Also part of the contract: a SKU repeated in one request is merged into one
+line; `status` is always `accepted` for a stored order while `stock_status`
+is `pending` until the worker processes the row, then `applied`; `order_ref`
+is limited to URL-unreserved characters so every accepted ref appears
+unencoded in `GET /orders/{order_ref}`. The service function owns the
+transaction, committing a success and rolling back a conflict or failure;
+the request-scoped session dependency manages only the session's lifetime.
+
+## Applying stock
+
+The worker runs one transaction per order:
+
+1. Claim the oldest pending row with `SELECT ... FOR UPDATE SKIP LOCKED`.
+2. For each `{sku, qty}` in the row, in sorted SKU order, run
+   `UPDATE products SET stock = stock - qty`.
+3. Mark the row `processed` and commit.
+
+The decrement and the completion marker commit together, which is the whole
+recovery story:
 
 | Interruption | Result |
 |---|---|
-| Worker is stopped when an order arrives | Order is accepted; its work row stays pending |
-| Worker crashes after decrementing, before committing | Transaction rolls back; the row stays pending and is retried |
-| Worker commits, then crashes | Stock and completion are both persisted; nothing is retried |
+| Worker is down when an order arrives | Order accepted; its work row waits in PostgreSQL |
+| Worker fails after decrementing, before committing | Rollback; the row stays pending and is retried |
+| Worker commits, then dies | Stock and marker are both durable; nothing is retried |
 
-`SKIP LOCKED` lets several workers run without claiming the same row. One
-order per transaction isolates a rollback to that order; it does not remove
-contention when orders touch the same stock rows.
+`SKIP LOCKED` lets several workers run without claiming the same row. The
+atomic `UPDATE` means concurrent decrements of one SKU serialise on the row
+lock and none is lost, and the sorted order gives workers applying
+overlapping orders a consistent lock order. When nothing is pending, or an
+attempt fails, the loop waits `WORKER_POLL_INTERVAL_SECONDS` (default one
+second). Retry is minimal: a failed row is logged, stays pending and is
+retried, with no attempt counter and no failed state.
 
-### Status
+SIGINT and SIGTERM set a flag that the loop checks before each attempt and
+again once a row is claimed. A claim that finds the flag set is released
+unapplied; an order past that point is finished whole, and the process exits
+0. The flag cannot interrupt a statement already waiting inside PostgreSQL,
+so shutdown waits for it. A worker killed outright leaves an open
+transaction for PostgreSQL to roll back: the second row of the table.
 
-An order is `accepted` once its transaction commits. Its stock status is
-`pending` until the worker processes the row, then `applied`. The order
-details endpoint reports both, so "received" and "stock reflects it" are
-distinguishable.
+## Schema
 
-### The two unhappy paths
-
-- **Duplicates:** the seed/burst command repeats some `order_ref` values.
-  Afterwards one order exists per `order_ref` and stock was decremented once
-  per order.
-- **Interruption and catch-up:** stop the worker process while PostgreSQL
-  and the API keep running, submit orders, observe them accepted with stock
-  `pending`, restart the worker, observe stock catch up. A real restart
-  shows the pending work survives in PostgreSQL, not in memory.
-
-## Decisions
-
-### Web framework: FastAPI
-
-- **Rationale:** FastAPI integrates Pydantic request and response models
-  with validation and generated OpenAPI documentation. These features
-  directly support clear, documented interfaces that other teams can
-  build on, with limited additional integration work.
-
-- **Alternatives:** Flask is a viable lightweight option, but equivalent
-  schema validation and OpenAPI support would require extensions or
-  additional implementation. Django offers useful integrated database
-  tooling and application conventions, although its admin functionality
-  is outside the brief. FastAPI was selected for its API-focused features
-  and flexibility in choosing persistence and worker tooling.
-
-- **Trade-offs:** Database access, migrations and durable background
-  processing must be selected and integrated separately. This provides
-  flexibility but leaves more architectural decisions to the application.
-
-### Database access: SQLAlchemy 2.x, Psycopg 3 and Alembic
-
-SQLAlchemy 2.x (the 2.0-style API; 2.1 at the time of writing) for
-persistence, Psycopg 3 as the driver and
-Alembic for versioned migrations. ORM-mapped models define tables and handle
-ordinary reads and writes; the concurrency-critical statements are written
-explicitly as Core or SQL: the `ON CONFLICT` insert, the `SKIP LOCKED` claim
-and the stock decrement. Pydantic API schemas stay separate from database
-models.
-
-- **Rationale:** Alembic reproduces the schema from an empty database.
-  Sessions give one place to own transactions. Explicit critical statements
-  keep the behaviour under test visible in the code.
-- **Alternatives:** Psycopg alone with parameterised SQL is credible for
-  this few queries; its row factories handle mapping, and migrations could
-  be plain SQL files applied by a small script or by Alembic anyway. It was
-  not chosen because the session and migration structure is worth having
-  as the schema grows. SQLModel reduces model duplication, but API contracts
-  and database records have different responsibilities here and the
-  separation is manageable at this size.
-- **Trade-offs:** SQLAlchemy's session lifecycle, flushing and loading
-  behaviour must be understood and tested.
-
-### Execution model: synchronous
-
-Plain `def` endpoints with a `Session`, and a blocking worker loop.
-
-- **Rationale:** FastAPI runs `def` endpoints on a thread pool, so requests
-  are served concurrently. The concurrency that matters here is settled in
-  PostgreSQL by constraints and row locks, not by the Python execution
-  model. A transaction is one session on one thread, with no lazy-loading
-  pitfalls in async code and no async test fixtures.
-- **Alternatives:** `AsyncSession` may improve throughput under many slow
-  concurrent connections, which the brief does not call for, at the cost of
-  async fixtures and stricter loading rules.
-- **Limitation:** throughput is bounded by the thread pool and connection
-  pool. Moving to async later touches session and endpoint code, not the
-  schema or design.
-
-### API and worker: separate processes
-
-- **Rationale:** the worker can be stopped, restarted and diagnosed without
-  interrupting intake, the interruption demonstration is a real restart,
-  and the component boundary is visible in both code and demo without
-  demo-only pause code.
-- **Alternatives:** a background thread inside the API process, which the
-  brief permits. It starts with one command but needs a pause mechanism for
-  the demonstration, and stopping the process to show recovery would also
-  stop intake.
-- **Trade-offs:** two processes to start and document, plus worker shutdown
-  handling. Schema and work-row contract changes must stay compatible
-  across both processes.
-
-### Durable processing: transactional pending-work table with polling
-
-The transactional outbox pattern, as described under Correctness and
-recovery.
-
-- **Rationale:** PostgreSQL's all-or-nothing transaction makes the
-  guarantees simple: no order without its work, no stock change without its
-  completion marker. Polling with `SKIP LOCKED` is minimal and the brief
-  explicitly allows it.
-- **Alternatives:** a stock-status column on the order row saves a table but
-  has the worker writing Orders tables. `LISTEN/NOTIFY` or a broker lowers
-  latency, but notifications are not durable alone and a broker is extra
-  infrastructure.
-- **Trade-offs:** stock is eventually consistent; latency depends on the
-  polling interval, backlog and worker availability. The exactly-once effect
-  relies on the stock and work tables sharing one database; a separate
-  Stock database would need an idempotency key on the stock side instead.
-
-### Schema
-
-Four tables, created by one Alembic revision after the baseline, mapped in
-`src/orders_stock/models.py`:
+Four tables, versioned in Alembic and mapped in `src/orders_stock/models.py`:
 
 | Table | Owner | Purpose |
 |---|---|---|
@@ -185,367 +116,167 @@ Four tables, created by one Alembic revision after the baseline, mapped in
 
 Money is integer cents (`integer` for prices, `bigint` for totals) and
 timestamps are `timestamptz`. Prices and totals are checked non-negative and
-quantities positive; stock is deliberately unchecked (see Insufficient stock).
-Constraint names follow a naming convention on the declarative base so later
-migrations and tests can refer to them.
+quantities positive. Stock is deliberately unchecked.
 
-- **SKU as the product key.** The brief, the API, the worker and the report
-  all identify products by SKU, so a surrogate id would only add a join.
-- **Work payload as JSONB.** `stock_work.items` is a JSON array of
-  `{"sku", "qty"}` objects. The work row is a message the worker consumes
-  whole: one insert at acceptance, one claim in the worker, and no second
-  table mirroring `order_items`. The schema guarantees only that the value
-  is an array. Orders builds a valid payload at acceptance with one entry
-  per SKU, summing the quantities of any SKU repeated in the request, and the
-  worker decrements each entry once.
-  Alternative: child rows with a foreign key to `products`, which would
-  validate each SKU in the database and let the worker decrement in one
-  joined update. Not chosen because the API already validates SKUs against
-  `products` and nothing deletes products.
-- **Work row references the order.** `stock_work.order_id` is a unique
-  foreign key to `orders.id`, so a work row can neither be orphaned nor
-  duplicated. This ties the two capabilities to one database, which the
-  design already assumes (see Durable processing). A free-standing
-  `order_ref` column would ease a later split into separate databases.
-- **Status as text with a check.** `pending` or `processed`, plus a check
-  that `processed_at` is set exactly when the status is `processed`. A
-  partial index on pending rows by `created_at` keeps the worker's
-  oldest-first claim cheap as processed rows accumulate.
-- **One models module.** Four tables do not need per-component model files.
-  The component boundary is which tables each component reads and writes,
-  not where the classes are defined, and placing classes in separate modules
-  would not enforce that boundary by itself.
+- **SKU is the product key.** Everything identifies products by SKU; a
+  surrogate id would only add a join.
+- **The work payload is JSONB**, an array of `{sku, qty}` objects with one
+  entry per SKU: a message the worker consumes whole, with no second table
+  mirroring `order_items`. The schema checks only that it is an array;
+  Orders builds a valid payload and the worker decrements each entry once.
+- **The work row references the order** through a unique foreign key, so it
+  can be neither orphaned nor duplicated. A partial index on pending rows
+  keeps the oldest-first claim cheap as processed rows accumulate.
 
-### Insufficient stock: out of scope
+## Daily report
 
-The API accepts without checking stock, the worker always applies the
-decrement, and there is no non-negative constraint on stock.
+`GET /reports/daily?date=YYYY-MM-DD` returns the day's order count and
+revenue, units sold per SKU (sold SKUs only), every product's current stock,
+and `generated_at`.
 
-- **Rationale:** the brief requires that acceptance does not depend on the
-  stock capability being available, so this design does not verify stock at
-  acceptance. The brief also limits the unhappy paths to two. Rejecting on shortage would add a third lifecycle (a failed
-  state, what happens to the order, how the report counts it).
-- **Alternatives:** confirm in the worker and reject on shortage, which fits
-  the current boundaries and is the natural next step for a real product;
-  backorders; or reservation before confirmation.
-- **Behaviour if the assumption fails:** a negative stock level, not an
-  error. Acceptance confirms persistence; it does not reserve inventory.
+A day is a UTC calendar day by `accepted_at`, the half-open interval from
+midnight to the next midnight, so an order at exactly midnight belongs to
+the new day. The last representable date cannot form that interval and is a
+`422`, as is any value not strictly in `YYYY-MM-DD` form.
 
-### Orders API
+The three queries run in one read-only `REPEATABLE READ` transaction scoped
+to the request, so an order that commits mid-report is counted consistently
+or not at all. Orders are counted and summed without joining items, and
+units are grouped in a separate query, so a multi-item order cannot multiply
+the count or the revenue. Revenue sums stored totals, so it reflects the
+prices at acceptance, and duplicates never appear because they are never
+stored.
 
-`POST /orders` accepts `{order_ref, customer_id, items: [{sku, qty}]}` and
-`GET /orders/{order_ref}` returns the order. Both return the same body:
-`order_ref`, `customer_id`, `items` (each with `sku`, `qty` and the
-`unit_price_cents` snapshot), `total_cents`, `accepted_at`, and two separate
-status fields, `status` and `stock_status`.
+`generated_at` is `now()` inside that transaction, which in PostgreSQL is
+the transaction's start time. It is not an exact timestamp of the snapshot,
+and `current_stock` is not a historical level for the reported day: it is
+every product's live stock as of that transaction, which still lags any
+accepted orders the worker has not applied.
 
-- **201 for a new order, 200 for a repeat.** A repeated `order_ref` returns
-  the existing order with 200 and writes nothing, so the call is idempotent
-  from the client's side and the seed/burst command can count new and
-  duplicate outcomes by status code. A 409 was rejected because a repeat is
-  a success, not an error. "The same body" means the stored order details;
-  `stock_status` may legitimately have moved from `pending` to `applied`
-  between two submissions.
-- **Idempotency is keyed by `order_ref` alone.** Pydantic still rejects a
-  structurally invalid repeat (no items, `qty` below 1) with 422, but a
-  well-formed repeat is not validated against the catalogue or compared
-  with the stored order, so a repeat with different items, or with an
-  unknown SKU, returns the original order, even when the original is still
-  being accepted on another connection. Detecting a changed payload would
-  need a comparison rule and a response for the mismatch, which the brief
-  does not ask for.
-- **Insert before validate.** The order row is claimed first, with a
-  provisional total, and completed after validation in the same
-  transaction. The alternative, validating first and then inserting, needs
-  a lookup for the sequential repeat and still lets a repeat racing an
-  uncommitted original slip past the constraint into validation, which
-  makes the contract above timing-dependent. The cost is one `UPDATE` of
-  the total per accepted order and a rolled-back row per rejected request.
-- **Two status fields.** `status` is always `accepted` for a stored order
-  (an order that is not accepted does not exist). `stock_status` is derived
-  from the work row: `pending` until the worker processes it, then
-  `applied`. The database stores `processed` on the work row; the API says
-  `applied` because it describes the effect on stock, not the worker's
-  bookkeeping.
-- **Unknown SKU is 422.** The body is `{"detail": "Unknown SKU(s): A, B"}`,
-  a plain string rather than Pydantic's list of field errors, because the
-  failure concerns the request as a whole against the catalogue. Nothing is
-  written. Structural errors (no items, `qty` below 1, blank strings) are
-  Pydantic's usual 422.
-- **Repeated SKUs in one request are merged** into one order item and one
-  work-payload entry with the summed quantity, so the stored order has one
-  line per SKU and the worker decrements each SKU once.
-- **Range checks.** `qty` is bounded by PostgreSQL's `integer` in the request
-  schema, and the merged quantities and total are checked against `integer`
-  and `bigint` before insert, so an oversized order is a 422 rather than a
-  database error.
-- **`order_ref` format.** Letters, digits, `.`, `_`, `~` and `-`, at most
-  128 characters, and not only dots: the URL "unreserved" set, so every
-  accepted `order_ref` appears unencoded in `GET /orders/{order_ref}`. A
-  slash would split the path segment and make an accepted order unreadable,
-  and `.` or `..` are path segments that URL normalisation removes; the
-  alternative, a path-converter route that swallows slashes, still leaves
-  other characters to encode. Clients that use arbitrary keys would need to
-  map them. The `GET` path parameter carries the same constraints, so a ref
-  that could never have been accepted (for example one containing an encoded
-  NUL, which psycopg would reject with a server error) is a 422 before any
-  query, and every value the Orders API sends to PostgreSQL has been
-  validated at the boundary. `sku` and `customer_id` are free text but may not contain NUL,
-  which PostgreSQL text cannot hold and psycopg rejects client-side; without
-  the check that request would be a 500, not a 422. The 128-character cap on
-  all three identifiers is an API choice, not a database requirement:
-  PostgreSQL `text` is unbounded, and the cap simply keeps identifiers at a
-  size that is sensible to index, log and display.
-- **Wiring.** The application lifespan creates the engine and session
-  factory and disposes the engine on shutdown. A dependency yields one
-  `Session` per request and owns only its lifetime. The service function
-  owns the write transaction: it commits a successful acceptance and rolls
-  back a conflicting or failed one, so a caller that keeps the session,
-  such as a script, can retry without inheriting a half-written
-  transaction. Reads leave the usual implicit transaction, which the
-  session's lifetime ends. The Orders module reads the work row's status
-  but imports nothing from the Stock module.
+## The decisions that matter
 
-### Stock worker and stock endpoint
+**FastAPI with synchronous database access.** FastAPI gives validated
+Pydantic request and response models and generated OpenAPI documentation,
+most of what an interface other teams can build on needs; Flask would need
+extensions for the same and Django brings more than the brief uses.
+Endpoints are plain `def` functions with a `Session` and the worker is a
+blocking loop. FastAPI runs `def` endpoints on a thread pool, so requests
+are still served concurrently, and the concurrency that matters is settled
+by PostgreSQL constraints and row locks, not by the Python execution model.
+A transaction is one session on one thread, without the lazy-loading and
+fixture complications of async code. Throughput is bounded by the thread and
+connection pools, which the brief does not stress.
 
-`orders-stock-worker` polls the work table and applies each row as described
-under Applying stock; `GET /stock?sku=...` reads a product's current level.
+**Shared PostgreSQL with durable work rows.** The transactional outbox,
+polled with `SKIP LOCKED`, is the simplest mechanism that gives the
+guarantees above: no order without its work, no stock change without its
+completion marker, nothing held only in memory. A stock-status column on
+the order row would save a table but have the worker writing Orders tables.
+`LISTEN/NOTIFY` or a broker would cut latency, but notifications are not
+durable on their own and a broker is infrastructure the brief does not need.
+The trade-off is eventual consistency: stock lags acceptance by the polling
+interval, the backlog and worker availability. The exactly-once effect also
+relies on `stock_work` and `products` sharing one database; a separate Stock
+database would need an idempotency key on the stock side.
 
-- **One row per transaction, no batching.** The loop claims the oldest
-  pending row with `SELECT ... FOR UPDATE SKIP LOCKED`, decrements each SKU,
-  marks the row processed and commits, with a fresh session per attempt that
-  is closed before any wait. While rows are pending it goes straight on to
-  the next; when the queue is empty it waits `WORKER_POLL_INTERVAL_SECONDS`
-  (default 1 second, validated positive and finite) before polling again.
-  One row per transaction keeps a rollback confined to one order and is
-  simple and sufficient for this workload.
-- **Atomic decrement.** Each SKU is applied with one
-  `UPDATE products SET stock = stock - qty` expression rather than a
-  read-modify-write, so concurrent workers applying orders for the same SKU
-  serialise on the row lock and each applies its own quantity. The SKUs of
-  one order are decremented in sorted order so that workers applying
-  overlapping orders take product row locks in a consistent order, a
-  precaution against lock-ordering deadlocks.
-- **Retry is minimal.** A failed attempt is logged with the work-row id, the
-  order id and the traceback; the transaction rolls back, so the row stays
-  pending, and the worker waits one interval before polling again. There is
-  no attempt counter and no failed state. Limitation: a row that fails
-  permanently, for example a malformed payload or a decrement that would
-  take the `integer` stock column out of range, is reclaimed on every poll
-  because claims are oldest-first, so it stalls a single worker
-  indefinitely; with several workers the others skip it only while one has
-  it locked, so throughput degrades rather than stops. The next step would
-  be an attempts column and a quarantined status, and a decision on whether
-  the API exposes that state.
-- **Shutdown.** SIGINT or SIGTERM sets a flag that the loop checks before
-  each attempt and again once a row has been claimed. That second check is
-  the boundary: a claim that finds the flag set is released unapplied, and
-  an order past it commits or rolls back whole. Then the process exits 0.
-  The flag does not
-  interrupt a statement already waiting inside PostgreSQL, for example on a
-  row lock, so shutdown waits for the current database operation; the
-  polling interval bounds idle wake-up, not shutdown. A worker killed
-  outright leaves its open transaction for PostgreSQL to roll back, which is
-  the recovery table above.
-- **`GET /stock?sku=...`** returns `{sku, name, stock}`, 404 for an unknown
-  SKU and 422 when `sku` is missing, empty, longer than 128 characters or
-  contains NUL. The SKU is a query parameter rather than a path segment:
-  catalogue SKUs are free text, and one containing `/` or `.` could not be
-  read from a path. The `order_ref` route needed a character restriction to
-  stay readable; the Stock contract avoids imposing one. The Stock module
-  keeps its own copy of the identifier rules rather than importing them from
-  Orders, so the two contracts can evolve apart.
-### Seed and burst command
+**Integer cents and historical pricing.** Prices and totals are integers in
+cents, as in the brief's example data, so arithmetic is exact. Each order
+item stores the unit price read at acceptance and each order stores its
+total, so a later price change alters neither past orders nor the report.
 
-`orders-stock-seed-burst` is the brief's "tiny script or command": it seeds
-four products and submits eight orders, six distinct and two repeats of
-earlier `order_ref` values, one immediately after its original and one later.
+**Consistent UTC daily reporting.** Every timestamp is `timestamptz` and the
+report's day is defined in UTC by acceptance time, so a day means the same
+thing in every time zone and the figures are reproducible. Local-time
+reporting would need a time zone parameter and daylight-saving rules for no
+gain within the brief. Option A, an integration feed, was not chosen because
+it brings cursor and retention semantics plus a demonstration consumer; the
+report answers the other teams' need with a few aggregate queries over data
+the design already produces.
 
-- **Seed directly, burst over HTTP.** There is no products API and the brief
-  asks only for seeding, so the catalogue is inserted straight into
-  `products` with `ON CONFLICT (sku) DO NOTHING` and committed before the
-  first request. Re-running inserts nothing and leaves existing stock, prices
-  and names alone; resetting a level is a deliberate manual step. The burst
-  goes over HTTP to a running API so the demonstration exercises the real
-  surface, with the same function driven by the FastAPI test client in the
-  tests. `DATABASE_URL` must point at the database that API uses.
-- **Deterministic refs, sequential requests.** The refs are fixed, so the
-  printed output is reproducible and a second run shows every order as a
-  duplicate, which is itself the duplicate demonstration. `--batch` prefixes
-  the refs to submit a fresh set, for example while the worker is stopped.
-  The label is validated against the API's `order_ref` rules before any work.
-  Requests are sequential so the output reads in order; concurrent duplicates
-  are proven by the Orders tests, not by this command.
-- **Failure handling.** A transport error (API down, timeout) or a status
-  other than 201 or 200 prints a message and exits 1. A timeout can land
-  after acceptance, so re-running the same batch is the recovery: accepted
-  orders come back as duplicates.
-- **Stock sufficiency.** Seeded levels cover the documented burst and the
-  demonstration by a wide margin; they are not replenished for unlimited new
-  batches, and preserving them on re-runs is intentional.
-- **httpx2** is the runtime HTTP client because the FastAPI test client is an
-  httpx2 client, so one library serves the command and its tests.
+## Routine choices
 
-### Task 2: Option B, daily report
+`orders-stock-seed-burst` seeds the catalogue directly with
+`ON CONFLICT DO NOTHING`, since there is no products API, and submits the
+burst over HTTP so it exercises the real surface. Refs are deterministic, so
+output is reproducible and a rerun is itself the duplicate demonstration.
+Requests are sequential; concurrent duplicates are proved by tests. httpx2
+is the runtime client because the FastAPI test client is built on it.
 
-One endpoint returning, for a calendar day, total orders, revenue, units sold
-per SKU and current stock per SKU.
+uv manages Python 3.12, the virtual environment and the lockfile; Ruff
+formats and lints; mypy runs in strict mode; pydantic-settings reads typed
+settings from the environment and a `.env` file; Alembic migrations are the
+only way the schema changes. Engines use a short connect timeout so a
+process fails fast when PostgreSQL is unreachable.
 
-- **Rationale:** a few aggregate queries behind one endpoint, no new
-  component, deterministic against seeded data. The brief states this option
-  satisfies other teams' need to learn about accepted orders.
-- **Alternatives:** Option A introduces a consumer-facing feed with cursor
-  and retention semantics, plus a demonstration consumer. Option B provides
-  the required external visibility through aggregate queries over data the
-  design already produces.
+PostgreSQL 17 runs in Docker Compose on host port 5433 to avoid a locally
+installed server. The application runs natively for development and tests,
+and the same Compose file can run everything in containers: one image for
+all roles (two stages, `uv sync --locked --no-dev`, non-root, exec-form
+command so SIGTERM reaches the process), a one-shot `migrate` job that `api`
+and `worker` wait for, so migrations run exactly once, and a `seed-burst`
+service behind a profile that depends on `api` alone, so running it never
+restarts a deliberately stopped worker. Containers get a `DATABASE_URL`
+built from the `POSTGRES_*` values with the service address; `.env` itself
+is not passed through.
 
-#### The report endpoint
+## Testing evidence
 
-`GET /reports/daily?date=YYYY-MM-DD` returns `date`, `total_orders`,
-`revenue_cents`, `units_sold` per SKU, `current_stock` per product and
-`generated_at`.
+Tests run against a dedicated `orders_stock_test` database, migrated to head
+by the real Alembic migrations once per session and truncated between tests,
+with sessions that commit for real. That is what allows the concurrency and
+recovery tests, which need separate connections and visible commits:
 
-- **Its own package.** The report reads the Orders tables and the products
-  table, so it belongs to neither component. It lives in `reports/`, a
-  read-only surface over the shared database that neither component
-  imports; the import-boundary tests are unaffected.
-- **One snapshot.** Three statements (count and summed totals over the
-  day's orders; units per SKU from items joined to those orders; every
-  product's stock) run in one read-only `REPEATABLE READ` transaction,
-  set through the connection's execution options so the setting is scoped
-  to that request and nothing changes for Orders or the worker. Under the
-  default Read Committed, an order committing between the statements could
-  appear in the units but not the count. `generated_at` is `now()` inside
-  that transaction, its start time. Stock comes from the same snapshot but
-  reflects only what the worker has applied, as designed.
-- **Aggregates kept apart.** Orders are counted and summed without joining
-  items, so a multi-item order cannot multiply the count or revenue; units
-  are a separate grouped query. Revenue sums stored totals, so it reflects
-  the prices at acceptance, and duplicates are excluded because they are
-  never stored.
-- **Day boundary.** `[date 00:00 UTC, date + 1 00:00 UTC)`, so an order at
-  exactly midnight belongs to the new day. The last representable date
-  cannot form that interval and is a 422, like a missing or malformed date.
-  The format is strictly `YYYY-MM-DD`: Pydantic's lax date parsing would
-  also accept a day count since the epoch or a datetime at midnight, which
-  a validator rejects before parsing.
-- **Empty days** return zeros, an empty `units_sold` and the current stock.
-  No pagination, filtering or other metrics.
+- **Duplicates:** concurrent submissions of one `order_ref` yield one order
+  and one work row; a repeat with an unknown SKU racing its uncommitted
+  original receives the original; a repeat writes nothing.
+- **Pricing:** a later price change does not alter a stored total.
+- **Recovery:** a failure injected between the decrement and the commit
+  leaves stock and the row unchanged; two workers never process the same
+  row; concurrent orders for one SKU produce the combined deduction; rows
+  created while no worker runs are processed once one starts.
+- **Shutdown:** a signal during a transaction finishes it and starts no
+  other; a signal after a claim releases the row unapplied.
+- **Boundaries:** neither component imports the other; the worker touches
+  only `stock_work` and `products`.
+- **Schema and report:** the constraints reject what they should, stock may
+  go negative, migrations round-trip from empty; the UTC day boundary,
+  separate aggregation and the single snapshot hold.
 
-### Development tooling
-
-- **uv and Python 3.12.** uv manages the interpreter, virtual environment
-  and lockfile, so every command has one form, `uv run ...`, on Linux, macOS
-  and Windows, and CI installs it with a first-party action. Python 3.12 is
-  widely available and every dependency ships wheels for it; 3.13 or 3.14
-  would add nothing for this brief. Alternatives: `pip` with `venv` and a
-  requirements file (no lockfile without extra tooling), or Poetry (heavier
-  for the same result). Cost: a reviewer needs one install step for uv.
-- **Ruff and mypy strict.** Ruff formats and lints with one configuration
-  block. mypy runs in strict mode on the application and tests; SQLAlchemy
-  2.x and Pydantic are typed natively so no plugins beyond `pydantic.mypy`
-  are needed. Pyright would also serve; mypy is the conventional CI choice
-  and needs no Node runtime.
-- **PostgreSQL 17 in Docker Compose; the application native or in
-  containers.** One compose file. The `postgres` service has an init script
-  that creates the development and test databases. Credentials are not
-  hard-coded in the compose file; it reads them from the gitignored `.env`,
-  with local-only values in `.env.example`, and refuses to start if they are
-  missing. The native path is the development and test path: the application
-  runs from `uv run`, the worker interruption demo is a plain Ctrl+C, and
-  `docker compose up -d --wait postgres` starts only the database. The
-  container publishes host port 5433 to avoid clashing with a locally
-  installed PostgreSQL. Reviewers without Docker can point `.env` at any
-  PostgreSQL 17.
-- **Containerised application.** A reviewer with only Docker should be able
-  to run the whole system, so the same compose file also runs it. One
-  `Dockerfile` builds one image for all four roles (API, worker, migrations,
-  seed/burst): they are one codebase with one lockfile and differ only in
-  their command, so separate images would be copies of the same environment.
-  Two stages on the same `python:3.12-slim-bookworm` base: the builder copies
-  a pinned uv binary and runs `uv sync --locked --no-dev --no-editable` with
-  interpreter downloads disabled, so dependencies come from the lockfile
-  only, no development tools are installed and the virtual environment is
-  bound to the image's own Python; the runtime stage copies that environment
-  plus `alembic.ini` and the migrations, and runs as a non-root user with an
-  exec-form command so SIGTERM from `docker stop` reaches the process itself
-  and the worker's graceful shutdown works unchanged. Compose adds `migrate`
-  (one shot, after PostgreSQL's health check), then `api` and `worker`, which
-  start only after `migrate` completes successfully, so migrations run
-  exactly once in one place rather than in each process. `seed-burst` sits
-  behind a profile so `up` never seeds; it runs on request, depends on `api`
-  being healthy (successful migrations do not mean the API is accepting
-  requests yet) and on nothing else, so running it cannot restart a
-  deliberately stopped worker. The worker service gets a 30 second stop
-  grace period rather than the Compose default of 10, because its SIGTERM
-  handling waits for a statement blocked in PostgreSQL; if that is exceeded
-  the kill is still safe, since the uncommitted transaction rolls back and
-  the work row stays pending for retry, but the attempt is then redone
-  rather than finished. Containers receive a `DATABASE_URL` assembled from
-  the `POSTGRES_*` values with the service address, and `.env` is not passed
-  through, so the native host URL and the container URL cannot be confused.
-  Compose substitutes those values verbatim, without URL encoding, so they
-  must avoid URL-reserved characters; for local-only development credentials
-  that is documented rather than engineered around. Alternatives: an entrypoint script that migrates before starting
-  the API (ties migrations to one process, or runs them twice with the
-  worker); `restart: unless-stopped` on the worker (right for a deployment,
-  but obscures the stop/start demonstration); a full Compose smoke test in CI
-  (would cover networking and ordering, left manual for this assessment).
-  Verification: CI builds the image and checks that the installed
-  application imports and a console script runs. The full demonstration
-  (ordered startup, seed/burst over the container network, worker stop, a
-  fresh batch left pending, restart and catch-up, a repeated batch leaving
-  stock unchanged, data surviving `down`) was run against a disposable
-  volume and recorded in the pull request. Limitations: `docker compose run`
-  and `start` re-run the `migrate` job through the dependency chain, a no-op
-  at head; the image carries the `fastapi[standard]` toolchain the runtime
-  does not use; and there is no restart policy, so a worker that exits on a
-  failed startup check stays down until started again.
-- **pydantic-settings.** Typed settings from environment variables with a
-  `.env` file for development and a committed `.env.example`. A missing or
-  malformed database URL fails at startup with a clear error. The
-  alternative, hand-written `os.environ` reads, duplicates the parsing and
-  validation pydantic-settings provides.
-- **Test database strategy.** A dedicated `orders_stock_test` database,
-  migrated to head once per session by running the Alembic migrations (so
-  the real setup path is exercised), truncated between tests, with sessions
-  that commit for real. This is what makes the concurrency tests possible:
-  concurrent duplicate submissions, `SKIP LOCKED` claims and failures
-  injected mid-transaction all need separate connections and visible
-  commits. Tests fail rather than skip when the database is unreachable.
-  Alternatives: per-test transaction rollback on one connection (rules out
-  the concurrency tests), a database per test (slow for the same guarantee)
-  or Testcontainers (self-contained, but adds a Docker requirement inside
-  the test run when the compose database and CI service container already
-  exist).
-- **Entry points.** `orders-stock-api` and `orders-stock-worker` console
-  scripts, with `python -m` equivalents for environments that block script
-  launchers. `fastapi dev` also serves the app via the `[tool.fastapi]`
-  entrypoint for auto-reload during development. Engines use a 5 second
-  connect timeout so a process fails fast when PostgreSQL is unreachable.
+GitHub Actions runs the suite, Ruff and mypy against a PostgreSQL 17 service
+container, builds the image and smoke-checks it. The full Compose
+demonstration is manual.
 
 ## Assumptions
 
-- Stock is sufficient for the demonstrated workload; seed data supports the
-  full burst and the demonstration, not unlimited extra batches.
+- Seeded stock covers the documented burst and demonstration; it is not
+  replenished for unlimited extra batches and re-seeding never resets it.
 - Orders are validated for structure, positive quantities and known SKUs;
   business validation beyond that (customer existence, order size limits)
   is out of scope.
-- A well-formed repeat of an `order_ref` is the same order. Payload
+- A well-formed repeat of an `order_ref` is the same order; payload
   differences between repeats are not detected.
-- Monetary values are integer cents, as in the brief's example data.
-- Report days are calendar days in UTC by acceptance time. Revenue is the
-  sum of accepted order totals; duplicates are excluded because they are
-  never stored. Current stock per SKU is read live, not a per-day snapshot,
-  and may lag accepted orders the worker has not yet applied.
+- Monetary values are integer cents. Report days are UTC calendar days by
+  acceptance time.
 - No authentication, as the brief permits.
 
-## Known limitations
+## Limitations
 
-- Stock lags acceptance; see Durable processing.
-- Both processes depend on one PostgreSQL database. A worker crash does not
-  stop intake, but a database outage stops both.
-- Insufficient stock yields a negative level rather than a rejection.
-- A work row that fails permanently is retried on every poll and stalls a
-  single worker; see Stock worker and stock endpoint.
-- Worker shutdown waits for the current database operation to finish.
+- **Negative stock is allowed.** Acceptance does not check stock, the
+  worker always applies the decrement and there is no non-negative
+  constraint, so a shortage yields a negative level rather than a
+  rejection. The brief limits the unhappy paths to two, and rejecting on
+  shortage would add a third order lifecycle.
+- **Stock is eventually consistent.** It lags acceptance by the polling
+  interval, the backlog and worker availability, and the report's current
+  stock lags the same way.
+- **Both processes depend on the shared database.** A worker outage does
+  not stop intake; a PostgreSQL outage stops both.
+- **A permanently failing work row stalls a single worker.** Claims are
+  oldest-first and there is no failed state, so a row that always fails (a
+  malformed payload, a decrement out of `integer` range) is reclaimed on
+  every poll. With several workers the others skip it only while one holds
+  it, so throughput degrades rather than stops. The next step would be an
+  attempt counter and a quarantined status.
+- **Shutdown can wait on an in-flight database statement.** The stop flag
+  is checked between statements, not inside PostgreSQL, so a worker blocked
+  on a row lock exits only when that statement returns.
