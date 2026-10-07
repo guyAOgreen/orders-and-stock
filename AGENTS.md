@@ -128,8 +128,11 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   health check on `/health`) and `worker`, both gated on `migrate` completing
   successfully; `seed-burst` sits behind the `tools` profile with the API URL
   fixed to `http://api:8000` and depends on `api` alone, never the worker.
-  Containers get `DATABASE_URL` assembled from the `POSTGRES_*` values with
-  the service address `postgres:5432`, plus `LOG_LEVEL` and
+  The worker has `stop_grace_period: 30s`; a kill after that rolls the
+  attempt back and leaves the work row pending. Containers get
+  `DATABASE_URL` assembled from the `POSTGRES_*` values with the service
+  address `postgres:5432` by plain substitution (so those values must avoid
+  URL-reserved characters), plus `LOG_LEVEL` and
   `WORKER_POLL_INTERVAL_SECONDS`; `.env` is not passed through. Native
   development starts only `postgres`. CI builds the image and runs an import
   and `--help` smoke check; the full Compose demonstration stays manual.

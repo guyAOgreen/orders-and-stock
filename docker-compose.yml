@@ -10,6 +10,8 @@ x-app: &app
   image: orders-stock
   environment: &app-env
     # The service address, not the host port; the native URL in .env uses localhost:5433.
+    # Plain interpolation, no URL encoding: the POSTGRES_* values must not contain
+    # URL-reserved characters (see .env.example).
     DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:?set in .env}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:?set in .env}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
@@ -72,6 +74,10 @@ services:
     environment:
       <<: *app-env
       WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-1.0}
+    # SIGTERM lets the worker finish the order in progress; a statement blocked in
+    # PostgreSQL is not interrupted, so allow longer than the 10 s default before
+    # SIGKILL. A kill rolls the attempt back and the work row stays pending.
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy

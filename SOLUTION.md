@@ -476,10 +476,17 @@ per SKU and current stock per SKU.
   behind a profile so `up` never seeds; it runs on request, depends on `api`
   being healthy (successful migrations do not mean the API is accepting
   requests yet) and on nothing else, so running it cannot restart a
-  deliberately stopped worker. Containers receive a `DATABASE_URL` assembled
-  from the `POSTGRES_*` values with the service address, and `.env` is not
-  passed through, so the native host URL and the container URL cannot be
-  confused. Alternatives: an entrypoint script that migrates before starting
+  deliberately stopped worker. The worker service gets a 30 second stop
+  grace period rather than the Compose default of 10, because its SIGTERM
+  handling waits for a statement blocked in PostgreSQL; if that is exceeded
+  the kill is still safe, since the uncommitted transaction rolls back and
+  the work row stays pending for retry, but the attempt is then redone
+  rather than finished. Containers receive a `DATABASE_URL` assembled from
+  the `POSTGRES_*` values with the service address, and `.env` is not passed
+  through, so the native host URL and the container URL cannot be confused.
+  Compose substitutes those values verbatim, without URL encoding, so they
+  must avoid URL-reserved characters; for local-only development credentials
+  that is documented rather than engineered around. Alternatives: an entrypoint script that migrates before starting
   the API (ties migrations to one process, or runs them twice with the
   worker); `restart: unless-stopped` on the worker (right for a deployment,
   but obscures the stop/start demonstration); a full Compose smoke test in CI
