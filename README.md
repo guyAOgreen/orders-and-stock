@@ -15,7 +15,9 @@ and `GET /orders/{order_ref}` with idempotent acceptance by `order_ref`, a
 worker that applies pending stock work one order per transaction,
 `GET /stock?sku=...` for current stock, and `orders-stock-seed-burst` to seed
 products and submit a burst of orders with duplicates, and
-`GET /reports/daily?date=...` for the daily report. See [SOLUTION.md](SOLUTION.md) for the design and
+`GET /reports/daily?date=...` for the daily report. The whole application
+also runs in containers from one image (see [Run in containers](#run-in-containers)).
+See [SOLUTION.md](SOLUTION.md) for the design and
 [AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
@@ -23,17 +25,19 @@ products and submit a burst of orders with duplicates, and
 - Linux or macOS (development on Windows works too; see the note below).
 - [uv](https://docs.astral.sh/uv/) — installs Python 3.12 and all
   dependencies: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Docker with Compose, for PostgreSQL. Without Docker, use any PostgreSQL 17
-  server: create databases `orders_stock` and `orders_stock_test` and point the
-  URLs in `.env` at them.
+- Docker with Compose, for PostgreSQL, and optionally to run the whole
+  application in containers (then uv is not needed; see
+  [Run in containers](#run-in-containers)). Without Docker, use any
+  PostgreSQL 17 server: create databases `orders_stock` and
+  `orders_stock_test` and point the URLs in `.env` at them.
 
 ## Setup
 
 ```bash
-cp .env.example .env            # connection URLs matching docker-compose.yml
-docker compose up -d --wait     # PostgreSQL 17 on localhost:5433; waits until it is ready
-uv sync                         # creates .venv with Python 3.12 and all dependencies
-uv run alembic upgrade head     # applies the schema to the development database
+cp .env.example .env                  # connection URLs matching docker-compose.yml
+docker compose up -d --wait postgres  # PostgreSQL 17 on localhost:5433; waits until it is ready
+uv sync                               # creates .venv with Python 3.12 and all dependencies
+uv run alembic upgrade head           # applies the schema to the development database
 ```
 
 Both the container and the application read their credentials from `.env`,
@@ -42,6 +46,10 @@ development only. PostgreSQL is published on host port 5433 rather than 5432
 so it does not clash with a locally installed server. The test database
 `orders_stock_test` is created automatically the first time the container
 starts.
+
+Name the `postgres` service as shown. A bare `docker compose up` also starts
+the containerised API and worker, and a native API started afterwards would
+find port 8000 taken.
 
 ## Run
 
@@ -207,6 +215,73 @@ PostgreSQL and the API running:
 Submitting the same `order_ref` again at any point returns `200` with the
 existing order and leaves stock untouched, which is the duplicate path.
 
+## Run in containers
+
+Everything can also run in Docker: one image, built from
+[Dockerfile](Dockerfile) and the committed `uv.lock`, serves the API, the
+worker, the migrations and the seed/burst command. Only Docker is needed on
+the host.
+
+```bash
+cp .env.example .env                  # the same credentials file as above
+docker compose up --build -d --wait   # build the image, then start everything in order
+```
+
+Compose starts PostgreSQL, waits for its health check, runs
+`alembic upgrade head` in a one-shot `migrate` service, and only then starts
+`api` and `worker`. Migrations run in that one job and nowhere else. The API
+listens on `0.0.0.0:8000` inside its container and is published on
+http://127.0.0.1:8000, so every `curl` example above works unchanged.
+`--wait` returns once the API's own health check on `/health` passes;
+`migrate` shows as `Exited (0)` in `docker compose ps -a`, which is its
+finished state.
+
+The containers reach the database at `postgres:5432`, the Compose service
+address, through a `DATABASE_URL` that the Compose file assembles from the
+`POSTGRES_*` values in `.env`. The `.env` file itself is not passed into the
+containers, so the native `localhost:5433` URL is untouched; `LOG_LEVEL` and
+`WORKER_POLL_INTERVAL_SECONDS` are forwarded.
+
+Seed and burst run on request, never at startup, against the API over the
+container network:
+
+```bash
+docker compose run --rm seed-burst                              # seed, then the default batch
+docker compose run --rm seed-burst --burst-only --batch demo2   # a fresh batch
+docker compose run --rm seed-burst --seed-only
+```
+
+The output is the same as the native command's. `run` starts the API and its
+dependencies if they are not running and re-runs the `migrate` job, which is
+a no-op once the schema is at head. It never starts the worker, so the
+interruption demo is safe:
+
+```bash
+docker compose logs -f api worker     # follow both processes; add migrate for the migration output
+docker compose stop worker            # SIGTERM: the worker finishes the current order and exits 0
+docker compose run --rm seed-burst --burst-only --batch demo3   # accepted, stock_status "pending"
+docker compose start worker           # catches up oldest first; stock_status becomes "applied"
+docker compose down                   # stops and removes the containers; the database volume stays
+```
+
+The image runs each command in exec form, with no shell in between, so
+`stop` delivers SIGTERM to the application process itself and the worker's
+graceful shutdown applies exactly as it does natively. The API keeps serving
+while the worker is down. After a code change,
+`docker compose up --build -d --wait` rebuilds the image and recreates the
+changed services.
+
+**Resetting.** Data lives in the named volume `postgres-data` and survives
+`stop`, `start`, `restart`, `down` and rebuilds. Neither startup nor seeding
+resets anything: the seed adds missing products only and never changes stock.
+To start from an empty database, remove the volume explicitly. This deletes
+every order, product and stock level in both the development and the test
+database:
+
+```bash
+docker compose down -v                # deletes this project's database volume
+```
+
 ## Test and check
 
 ```bash
@@ -237,7 +312,8 @@ The same checks run in GitHub Actions on every pull request and push to
 | `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |
 | `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |
-| `docker-compose.yml`, `docker/` | PostgreSQL container and its init script |
+| `Dockerfile`, `.dockerignore` | The application image: one build for the API, worker, migrations and seed/burst |
+| `docker-compose.yml`, `docker/` | PostgreSQL with its init script, the one-shot `migrate` job, the `api` and `worker` services and the on-request `seed-burst` service |
 | `tests/` | pytest suite; fixtures in `tests/conftest.py` |
 
 ## Windows note

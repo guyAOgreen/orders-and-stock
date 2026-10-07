@@ -1,0 +1,24 @@
+# The image needs the source, the lockfile, the README (read by the build
+# backend) and the migrations. Everything else stays out of the build context.
+.git
+.gitignore
+.gitattributes
+.github
+.venv
+.env
+.env.*
+__pycache__
+*.py[cod]
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.agents
+.claude
+docs
+tests
+*.md
+!README.md
+docker
+docker-compose.yml
+Dockerfile
+.dockerignore

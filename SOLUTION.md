@@ -446,18 +446,54 @@ per SKU and current stock per SKU.
   2.x and Pydantic are typed natively so no plugins beyond `pydantic.mypy`
   are needed. Pyright would also serve; mypy is the conventional CI choice
   and needs no Node runtime.
-- **PostgreSQL 17 in Docker Compose, application native.** One compose
-  service with an init script that creates the development and test
-  databases. Credentials are not hard-coded in the compose file; it reads
-  them from the gitignored `.env`, with local-only values in `.env.example`,
-  and refuses to start if they are missing. The application runs natively so
-  the worker interruption demo
-  is a plain Ctrl+C. The container publishes host port 5433 to avoid
-  clashing with a locally installed PostgreSQL. Reviewers without Docker can
-  point `.env` at any PostgreSQL 17. Containerising the application itself
-  is deferred: configuration is environment-only and there are two entry
-  points, so adding a Dockerfile later is cheap, and it would be an extra way
-  to run the project rather than a replacement for the native path.
+- **PostgreSQL 17 in Docker Compose; the application native or in
+  containers.** One compose file. The `postgres` service has an init script
+  that creates the development and test databases. Credentials are not
+  hard-coded in the compose file; it reads them from the gitignored `.env`,
+  with local-only values in `.env.example`, and refuses to start if they are
+  missing. The native path is the development and test path: the application
+  runs from `uv run`, the worker interruption demo is a plain Ctrl+C, and
+  `docker compose up -d --wait postgres` starts only the database. The
+  container publishes host port 5433 to avoid clashing with a locally
+  installed PostgreSQL. Reviewers without Docker can point `.env` at any
+  PostgreSQL 17.
+- **Containerised application.** A reviewer with only Docker should be able
+  to run the whole system, so the same compose file also runs it. One
+  `Dockerfile` builds one image for all four roles (API, worker, migrations,
+  seed/burst): they are one codebase with one lockfile and differ only in
+  their command, so separate images would be copies of the same environment.
+  Two stages on the same `python:3.12-slim-bookworm` base: the builder copies
+  a pinned uv binary and runs `uv sync --locked --no-dev --no-editable` with
+  interpreter downloads disabled, so dependencies come from the lockfile
+  only, no development tools are installed and the virtual environment is
+  bound to the image's own Python; the runtime stage copies that environment
+  plus `alembic.ini` and the migrations, and runs as a non-root user with an
+  exec-form command so SIGTERM from `docker stop` reaches the process itself
+  and the worker's graceful shutdown works unchanged. Compose adds `migrate`
+  (one shot, after PostgreSQL's health check), then `api` and `worker`, which
+  start only after `migrate` completes successfully, so migrations run
+  exactly once in one place rather than in each process. `seed-burst` sits
+  behind a profile so `up` never seeds; it runs on request, depends on `api`
+  being healthy (successful migrations do not mean the API is accepting
+  requests yet) and on nothing else, so running it cannot restart a
+  deliberately stopped worker. Containers receive a `DATABASE_URL` assembled
+  from the `POSTGRES_*` values with the service address, and `.env` is not
+  passed through, so the native host URL and the container URL cannot be
+  confused. Alternatives: an entrypoint script that migrates before starting
+  the API (ties migrations to one process, or runs them twice with the
+  worker); `restart: unless-stopped` on the worker (right for a deployment,
+  but obscures the stop/start demonstration); a full Compose smoke test in CI
+  (would cover networking and ordering, left manual for this assessment).
+  Verification: CI builds the image and checks that the installed
+  application imports and a console script runs. The full demonstration
+  (ordered startup, seed/burst over the container network, worker stop, a
+  fresh batch left pending, restart and catch-up, a repeated batch leaving
+  stock unchanged, data surviving `down`) was run against a disposable
+  volume and recorded in the pull request. Limitations: `docker compose run`
+  and `start` re-run the `migrate` job through the dependency chain, a no-op
+  at head; the image carries the `fastapi[standard]` toolchain the runtime
+  does not use; and there is no restart policy, so a worker that exits on a
+  failed startup check stays down until started again.
 - **pydantic-settings.** Typed settings from environment variables with a
   `.env` file for development and a committed `.env.example`. A missing or
   malformed database URL fails at startup with a clear error. The

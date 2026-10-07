@@ -114,10 +114,25 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   convention on `Base`.
 - uv with Python 3.12; Ruff for formatting and linting; mypy in strict mode;
   pytest. PostgreSQL 17 runs in Docker Compose on host port 5433; the
-  application runs natively. Settings come from environment variables via
-  pydantic-settings. Tests use the dedicated `orders_stock_test` database,
+  application runs natively for development and tests, and can also run in
+  containers from the same Compose file. Settings come from environment
+  variables via pydantic-settings. Tests use the dedicated `orders_stock_test` database,
   migrated with Alembic once per session and truncated between tests, with
   real commits.
+- Containers: one image (`Dockerfile`, two stages on
+  `python:3.12-slim-bookworm`, a pinned uv copied into the builder,
+  `uv sync --locked --no-dev --no-editable` with `UV_PYTHON_DOWNLOADS=0`,
+  non-root user, exec-form command) serves the API, worker, migrations and
+  seed/burst. Compose runs `postgres`, a one-shot `migrate` job (the only
+  service that declares `build`), `api` (host port 8000, `API_HOST=0.0.0.0`,
+  health check on `/health`) and `worker`, both gated on `migrate` completing
+  successfully; `seed-burst` sits behind the `tools` profile with the API URL
+  fixed to `http://api:8000` and depends on `api` alone, never the worker.
+  Containers get `DATABASE_URL` assembled from the `POSTGRES_*` values with
+  the service address `postgres:5432`, plus `LOG_LEVEL` and
+  `WORKER_POLL_INTERVAL_SECONDS`; `.env` is not passed through. Native
+  development starts only `postgres`. CI builds the image and runs an import
+  and `--help` smoke check; the full Compose demonstration stays manual.
 
 **Unresolved**
 
@@ -257,12 +272,13 @@ limitations.
 ### Commands
 
 All commands run from the repository root. Each was run successfully on Linux
-(Debian container) and, in its `python -m` form where noted, on Windows.
+(Debian container) and, in its `python -m` form where noted, on Windows. The
+container commands were run on Windows with Docker Desktop.
 
 | Purpose | Command |
 |---|---|
 | Install dependencies | `uv sync` |
-| Start PostgreSQL | `docker compose up -d --wait` |
+| Start PostgreSQL (native development) | `docker compose up -d --wait postgres` |
 | Apply migrations | `uv run alembic upgrade head` |
 | New migration | `uv run alembic revision -m "<description>"` (use `--autogenerate` once models exist) |
 | Run the API | `uv run orders-stock-api` (or `uv run python -m orders_stock.api.main`) |
@@ -272,6 +288,12 @@ All commands run from the repository root. Each was run successfully on Linux
 | Format check / fix | `uv run ruff format --check .` / `uv run ruff format .` |
 | Lint / fix | `uv run ruff check .` / `uv run ruff check --fix .` |
 | Type check | `uv run mypy` |
+| Build the application image | `docker compose build` |
+| Run everything in containers | `docker compose up --build -d --wait` |
+| Seed and burst in containers | `docker compose run --rm seed-burst [--batch <label>] [--seed-only|--burst-only]` |
+| Stop / restart the containerised worker | `docker compose stop worker` / `docker compose start worker` |
+| Stop the containers | `docker compose down` (keeps the database volume) |
+| Delete the database volume | `docker compose down -v` (deletes all local data) |
 
 Tests need the PostgreSQL container and a `.env` (copy `.env.example`). Add
 dependencies with `uv add <package>` (or `uv add --dev <package>`) so
