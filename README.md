@@ -14,8 +14,8 @@ migrations for products, orders, order items and stock work, `POST /orders`
 and `GET /orders/{order_ref}` with idempotent acceptance by `order_ref`, a
 worker that applies pending stock work one order per transaction,
 `GET /stock?sku=...` for current stock, and `orders-stock-seed-burst` to seed
-products and submit a burst of orders with duplicates. The daily report is
-implemented in the follow-up issue. See [SOLUTION.md](SOLUTION.md) for the design and
+products and submit a burst of orders with duplicates, and
+`GET /reports/daily?date=...` for the daily report. See [SOLUTION.md](SOLUTION.md) for the design and
 [AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
@@ -151,6 +151,36 @@ An unknown SKU is `404` with `{"detail":"Unknown SKU"}`; a missing or empty
 `sku` is `422`. The SKU is a query parameter rather than a path segment so
 that any catalogue SKU, including one containing `/` or `.`, can be read.
 
+### Daily report
+
+Task 2 Option B: one endpoint summarising a UTC calendar day of accepted
+orders, plus the current stock of every product:
+
+```bash
+curl -s 'http://127.0.0.1:8000/reports/daily?date=2026-10-07'
+```
+
+```
+{"date":"2026-10-07","total_orders":6,"revenue_cents":18077,
+ "units_sold":[{"sku":"APL-003","units":8},{"sku":"BAN-001","units":9},
+               {"sku":"BRD-004","units":3},{"sku":"MLK-002","units":3}],
+ "current_stock":[{"sku":"APL-003","name":"Apples 1kg","stock":492},
+                  {"sku":"BAN-001","name":"Bananas 1kg","stock":491},
+                  {"sku":"BRD-004","name":"Bread 700g","stock":197},
+                  {"sku":"MLK-002","name":"Milk 2L","stock":297}],
+ "generated_at":"2026-10-07T09:15:02.123456Z"}
+```
+
+That is the seed/burst workload on the day it ran, after the worker applied
+it. A day is a calendar day in UTC by acceptance time; `total_orders` and
+`revenue_cents` count stored orders only, so duplicates never appear, and
+revenue uses the prices in effect when each order was accepted.
+`units_sold` lists only SKUs sold that day. `current_stock` is live, not a
+per-day snapshot: it is every product's level as of `generated_at`, and it
+still lags any accepted orders the worker has not applied. All figures come
+from one database snapshot. A day with no orders returns zeros, an empty
+`units_sold` and the current stock. A missing or malformed `date` is `422`.
+
 ### Demonstrating the interruption and catch-up
 
 Stock is applied by the worker, so stopping the worker simulates the stock
@@ -203,6 +233,7 @@ The same checks run in GitHub Actions on every pull request and push to
 | `src/orders_stock/stock/` | Stock capability: the worker loop (`worker.py`), the stock router and its schemas |
 | `src/orders_stock/worker_main.py` | Stock worker entry point: startup check, signal handling, the polling loop |
 | `src/orders_stock/seed_burst.py` | The seed and burst command |
+| `src/orders_stock/reports/` | The daily report: router, response schema and the snapshot queries |
 | `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |
 | `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |

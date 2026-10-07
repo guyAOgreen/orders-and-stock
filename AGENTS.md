@@ -95,7 +95,15 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   set, `--seed-only`/`--burst-only` run one phase, an unreachable API or an
   unexpected status exits 1. httpx2 is the runtime HTTP client, the library
   the FastAPI test client is built on.
-- Task 2 Option B: the daily report.
+- Task 2 Option B: the daily report. `GET /reports/daily?date=YYYY-MM-DD`
+  in its own `reports` package, a read-only surface over both components'
+  tables that neither component imports. Response: `date`, `total_orders`,
+  `revenue_cents`, `units_sold` (per SKU, sold SKUs only), `current_stock`
+  (every product, live) and `generated_at`. The day is UTC by `accepted_at`,
+  half-open `[00:00, next 00:00)`. The three queries run in one read-only
+  `REPEATABLE READ` transaction scoped to the request; orders and items are
+  aggregated separately so joins cannot multiply counts. The last
+  representable date is 422.
 - Schema: products are keyed by SKU; money is integer cents and timestamps
   are `timestamptz`. The stock-work row has a unique foreign key to the
   order and carries the SKU quantities as a JSONB array of `{sku, qty}`

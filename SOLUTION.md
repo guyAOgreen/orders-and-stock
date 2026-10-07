@@ -399,6 +399,36 @@ per SKU and current stock per SKU.
   the required external visibility through aggregate queries over data the
   design already produces.
 
+#### The report endpoint
+
+`GET /reports/daily?date=YYYY-MM-DD` returns `date`, `total_orders`,
+`revenue_cents`, `units_sold` per SKU, `current_stock` per product and
+`generated_at`.
+
+- **Its own package.** The report reads the Orders tables and the products
+  table, so it belongs to neither component. It lives in `reports/`, a
+  read-only surface over the shared database that neither component
+  imports; the import-boundary tests are unaffected.
+- **One snapshot.** Three statements (count and summed totals over the
+  day's orders; units per SKU from items joined to those orders; every
+  product's stock) run in one read-only `REPEATABLE READ` transaction,
+  set through the connection's execution options so the setting is scoped
+  to that request and nothing changes for Orders or the worker. Under the
+  default Read Committed, an order committing between the statements could
+  appear in the units but not the count. `generated_at` is `now()` inside
+  that transaction, its start time. Stock comes from the same snapshot but
+  reflects only what the worker has applied, as designed.
+- **Aggregates kept apart.** Orders are counted and summed without joining
+  items, so a multi-item order cannot multiply the count or revenue; units
+  are a separate grouped query. Revenue sums stored totals, so it reflects
+  the prices at acceptance, and duplicates are excluded because they are
+  never stored.
+- **Day boundary.** `[date 00:00 UTC, date + 1 00:00 UTC)`, so an order at
+  exactly midnight belongs to the new day. The last representable date
+  cannot form that interval and is a 422, like a missing or malformed date.
+- **Empty days** return zeros, an empty `units_sold` and the current stock.
+  No pagination, filtering or other metrics.
+
 ### Development tooling
 
 - **uv and Python 3.12.** uv manages the interpreter, virtual environment
@@ -460,7 +490,8 @@ per SKU and current stock per SKU.
 - Monetary values are integer cents, as in the brief's example data.
 - Report days are calendar days in UTC by acceptance time. Revenue is the
   sum of accepted order totals; duplicates are excluded because they are
-  never stored. Current stock per SKU is read live, not a per-day snapshot.
+  never stored. Current stock per SKU is read live, not a per-day snapshot,
+  and may lag accepted orders the worker has not yet applied.
 - No authentication, as the brief permits.
 
 ## Known limitations
