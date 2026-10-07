@@ -355,6 +355,36 @@ under Applying stock; `GET /stock?sku=...` reads a product's current level.
   stay readable; the Stock contract avoids imposing one. The Stock module
   keeps its own copy of the identifier rules rather than importing them from
   Orders, so the two contracts can evolve apart.
+### Seed and burst command
+
+`orders-stock-seed-burst` is the brief's "tiny script or command": it seeds
+four products and submits eight orders, six distinct and two repeats of
+earlier `order_ref` values, one immediately after its original and one later.
+
+- **Seed directly, burst over HTTP.** There is no products API and the brief
+  asks only for seeding, so the catalogue is inserted straight into
+  `products` with `ON CONFLICT (sku) DO NOTHING` and committed before the
+  first request. Re-running inserts nothing and leaves existing stock, prices
+  and names alone; resetting a level is a deliberate manual step. The burst
+  goes over HTTP to a running API so the demonstration exercises the real
+  surface, with the same function driven by the FastAPI test client in the
+  tests. `DATABASE_URL` must point at the database that API uses.
+- **Deterministic refs, sequential requests.** The refs are fixed, so the
+  printed output is reproducible and a second run shows every order as a
+  duplicate, which is itself the duplicate demonstration. `--batch` prefixes
+  the refs to submit a fresh set, for example while the worker is stopped.
+  The label is validated against the API's `order_ref` rules before any work.
+  Requests are sequential so the output reads in order; concurrent duplicates
+  are proven by the Orders tests, not by this command.
+- **Failure handling.** A transport error (API down, timeout) or a status
+  other than 201 or 200 prints a message and exits 1. A timeout can land
+  after acceptance, so re-running the same batch is the recovery: accepted
+  orders come back as duplicates.
+- **Stock sufficiency.** Seeded levels cover the documented burst and the
+  demonstration by a wide margin; they are not replenished for unlimited new
+  batches, and preserving them on re-runs is intentional.
+- **httpx2** is the runtime HTTP client because the FastAPI test client is an
+  httpx2 client, so one library serves the command and its tests.
 
 ### Task 2: Option B, daily report
 
@@ -421,7 +451,7 @@ per SKU and current stock per SKU.
 ## Assumptions
 
 - Stock is sufficient for the demonstrated workload; seed data supports the
-  full burst.
+  full burst and the demonstration, not unlimited extra batches.
 - Orders are validated for structure, positive quantities and known SKUs;
   business validation beyond that (customer existence, order size limits)
   is out of scope.

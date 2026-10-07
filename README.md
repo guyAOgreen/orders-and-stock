@@ -7,13 +7,15 @@ Python and PostgreSQL. The brief is in [docs/Requirements.pdf](docs/Requirements
 
 ## Status
 
-The schema and the Orders intake API are in place: FastAPI with SQLAlchemy,
-Psycopg and Alembic, a PostgreSQL 17 container, separate API and stock worker
-entry points, migrations for products, orders, order items and stock work, and
-`POST /orders` and `GET /orders/{order_ref}` with idempotent acceptance by
-`order_ref`. The stock worker applies pending stock work, one order per
-transaction, and `GET /stock?sku=...` reads current stock. The seed/burst
-command and the daily report are implemented in the follow-up issues. See [SOLUTION.md](SOLUTION.md) for the design and
+The schema, the Orders intake API, the stock worker and the seed/burst
+command are in place: FastAPI with SQLAlchemy, Psycopg and Alembic, a
+PostgreSQL 17 container, separate API and stock worker entry points,
+migrations for products, orders, order items and stock work, `POST /orders`
+and `GET /orders/{order_ref}` with idempotent acceptance by `order_ref`, a
+worker that applies pending stock work one order per transaction,
+`GET /stock?sku=...` for current stock, and `orders-stock-seed-burst` to seed
+products and submit a burst of orders with duplicates. The daily report is
+implemented in the follow-up issue. See [SOLUTION.md](SOLUTION.md) for the design and
 [AGENTS.md](AGENTS.md) for the development rules.
 
 ## Prerequisites
@@ -61,29 +63,59 @@ further order is started, and the process exits with status 0.
 
 Try it: `curl http://127.0.0.1:8000/health` returns `{"status":"ok"}`.
 
-### Orders API
+### Seed and burst
 
-Products must exist before orders can reference them. Until the seed command
-lands, insert a couple by hand:
+With the API running, `orders-stock-seed-burst` seeds four products straight
+into the database and then submits a short burst of eight orders through the
+API, two of which repeat an earlier `order_ref`:
 
 ```bash
-docker compose exec postgres psql -U orders_stock -d orders_stock -c \
-  "INSERT INTO products (sku, name, price_cents, stock) VALUES
-   ('BAN-001', 'Bananas 1kg', 199, 50), ('MLK-002', 'Milk 2L', 2599, 20)
-   ON CONFLICT (sku) DO NOTHING;"
+uv run orders-stock-seed-burst          # API at http://127.0.0.1:8000
 ```
+
+```
+Seeded 4 products (4 new, 0 existing)
+web-100045 -> 201 new
+web-100046 -> 201 new
+web-100045 -> 200 duplicate
+web-100047 -> 201 new
+web-100048 -> 201 new
+web-100049 -> 201 new
+web-100046 -> 200 duplicate
+web-100050 -> 201 new
+Submitted 8 orders: 6 new, 2 duplicates
+```
+
+Run it again and the seed reports `0 new, 4 existing` and every order comes
+back as a duplicate: products are never duplicated, existing stock levels are
+left alone, and the same `order_ref` is never counted twice. Options:
+
+- `--batch <label>` prefixes the refs (`<label>-100045`, ...) to submit a
+  fresh set, for example while the worker is stopped.
+- `--seed-only` / `--burst-only` run one phase.
+- `--api-url <url>` targets an API elsewhere; `DATABASE_URL` must point at the
+  database that API uses.
+
+If the API cannot be reached, or answers with anything other than `201` or
+`200`, the command prints the error and exits with status 1. A timeout can
+land after an order was accepted, so the recovery is simply to re-run the same
+batch: the accepted orders come back as duplicates. The seeded stock covers
+the documented burst and demonstration; it is not replenished, and the seed
+never resets it. To reset a level, update the `products` table directly.
+
+### Orders API
 
 Create an order. Prices are read at acceptance and copied onto the items:
 
 ```bash
 curl -i -X POST http://127.0.0.1:8000/orders -H 'content-type: application/json' \
-  -d '{"order_ref":"web-100045","customer_id":"cust-42",
+  -d '{"order_ref":"web-100099","customer_id":"cust-42",
        "items":[{"sku":"BAN-001","qty":2},{"sku":"MLK-002","qty":1}]}'
 ```
 
 ```
 HTTP/1.1 201 Created
-{"order_ref":"web-100045","customer_id":"cust-42",
+{"order_ref":"web-100099","customer_id":"cust-42",
  "items":[{"sku":"BAN-001","qty":2,"unit_price_cents":199},
           {"sku":"MLK-002","qty":1,"unit_price_cents":2599}],
  "total_cents":2997,"status":"accepted","stock_status":"pending",
@@ -91,7 +123,7 @@ HTTP/1.1 201 Created
 ```
 
 Send the same request again and the response is `200 OK` with the same order;
-nothing is written. `GET /orders/web-100045` returns the same body. `status`
+nothing is written. `GET /orders/web-100099` returns the same body. `status`
 is the acceptance status and `stock_status` is `pending` until the worker
 applies the stock decrement, then `applied`. An unknown SKU is rejected with
 `422` and `{"detail":"Unknown SKU(s): NOPE-000"}`; an unknown `order_ref` on
@@ -108,8 +140,12 @@ curl -s 'http://127.0.0.1:8000/stock?sku=BAN-001'
 ```
 
 ```
-{"sku":"BAN-001","name":"Bananas 1kg","stock":48}
+{"sku":"BAN-001","name":"Bananas 1kg","stock":491}
 ```
+
+That is the seeded level of 500 less the 9 bananas across the six distinct
+seed/burst orders, once the worker has applied them; while they are pending it is
+still 500.
 
 An unknown SKU is `404` with `{"detail":"Unknown SKU"}`; a missing or empty
 `sku` is `422`. The SKU is a query parameter rather than a path segment so
@@ -122,19 +158,21 @@ capability being unavailable while the API keeps accepting orders. With
 PostgreSQL and the API running:
 
 1. **Stop the worker** (Ctrl+C in its terminal), or do not start it yet.
-2. **Submit orders.** They are accepted as usual:
+2. **Submit orders.** A fresh batch from the seed/burst command is the
+   quickest way; a hand-written `POST /orders` works just as well:
 
    ```bash
-   curl -s -X POST http://127.0.0.1:8000/orders -H 'content-type: application/json'      -d '{"order_ref":"web-200001","customer_id":"cust-7","items":[{"sku":"BAN-001","qty":5}]}'
+   uv run orders-stock-seed-burst --burst-only --batch demo2
    ```
 
-3. **Observe the backlog.** `GET /orders/web-200001` reports
+   Every order is accepted as usual, six new and two duplicates.
+3. **Observe the backlog.** `GET /orders/demo2-100045` reports
    `"stock_status":"pending"` and `GET /stock?sku=BAN-001` is unchanged. The
    pending work is in PostgreSQL, so it survives any restart.
 4. **Restart the worker:** `uv run orders-stock-worker`. It logs
    `applied stock for order_id=...` for each backlog order, oldest first.
-5. **Observe the catch-up.** The order now reports `"stock_status":"applied"`
-   and the stock level has dropped by the ordered quantity.
+5. **Observe the catch-up.** The orders now report `"stock_status":"applied"`
+   and `GET /stock?sku=BAN-001` has dropped by the 9 bananas in the batch.
 
 Submitting the same `order_ref` again at any point returns `200` with the
 existing order and leaves stock untouched, which is the duplicate path.
@@ -164,6 +202,7 @@ The same checks run in GitHub Actions on every pull request and push to
 | `src/orders_stock/orders/` | Orders capability: request/response schemas, the acceptance service and its router |
 | `src/orders_stock/stock/` | Stock capability: the worker loop (`worker.py`), the stock router and its schemas |
 | `src/orders_stock/worker_main.py` | Stock worker entry point: startup check, signal handling, the polling loop |
+| `src/orders_stock/seed_burst.py` | The seed and burst command |
 | `src/orders_stock/models.py` | SQLAlchemy models for all tables; the schema is described in [SOLUTION.md](SOLUTION.md#schema) |
 | `src/orders_stock/config.py`, `db.py`, `logging_config.py` | Settings, database engine/session factory, logging setup |
 | `alembic/` | Migrations; `alembic/env.py` takes the URL from settings |

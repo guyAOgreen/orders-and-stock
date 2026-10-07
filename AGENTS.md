@@ -88,6 +88,13 @@ Keep these three groups separate. Do not treat a proposal as a decision.
   unknown SKU; 422 for a missing, empty, over-long or NUL-containing `sku`.
   The SKU is a query parameter so free-text SKUs stay readable. The Stock
   module keeps its own identifier rules rather than importing Orders'.
+- Seed and burst: `orders-stock-seed-burst` seeds four products directly into
+  `products` with `ON CONFLICT DO NOTHING` (never resets stock) and submits a
+  fixed, sequential burst of eight orders over HTTP (six distinct, two
+  repeats) with deterministic refs; `--batch` prefixes the refs for a fresh
+  set, `--seed-only`/`--burst-only` run one phase, an unreachable API or an
+  unexpected status exits 1. httpx2 is the runtime HTTP client, the library
+  the FastAPI test client is built on.
 - Task 2 Option B: the daily report.
 - Schema: products are keyed by SKU; money is integer cents and timestamps
   are `timestamptz`. The stock-work row has a unique foreign key to the
@@ -252,6 +259,7 @@ All commands run from the repository root. Each was run successfully on Linux
 | New migration | `uv run alembic revision -m "<description>"` (use `--autogenerate` once models exist) |
 | Run the API | `uv run orders-stock-api` (or `uv run python -m orders_stock.api.main`) |
 | Run the worker | `uv run orders-stock-worker` (or `uv run python -m orders_stock.worker_main`) |
+| Seed and burst | `uv run orders-stock-seed-burst [--batch <label>] [--seed-only|--burst-only] [--api-url <url>]` (or `uv run python -m orders_stock.seed_burst`) |
 | Tests | `uv run pytest` |
 | Format check / fix | `uv run ruff format --check .` / `uv run ruff format .` |
 | Lint / fix | `uv run ruff check .` / `uv run ruff check --fix .` |
