@@ -159,6 +159,12 @@ def test_sales_are_fixed_while_current_stock_is_live(
         {"date": "yesterday"},
         {"date": "2026-13-01"},
         {"date": "9999-12-31"},
+        # Lax date parsing would accept these; the contract is YYYY-MM-DD only.
+        {"date": "0"},
+        {"date": "20261007"},
+        {"date": "2026-10-7"},
+        {"date": "2026-10-07T00:00:00"},
+        {"date": "2026-10-07 00:00:00Z"},
     ],
 )
 def test_missing_invalid_or_unrepresentable_date_is_422(

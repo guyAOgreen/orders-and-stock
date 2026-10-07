@@ -1,9 +1,11 @@
 """HTTP route for the daily report."""
 
 import datetime as dt
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Query
+from pydantic import BeforeValidator
 
 from orders_stock.api.deps import SessionDep
 from orders_stock.reports.schemas import DailyReportResponse, StockLevel, UnitsSold
@@ -15,8 +17,20 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 # is a validation error rather than an overflow.
 LAST_REPORTABLE_DATE = dt.date.max - dt.timedelta(days=1)
 
+ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _iso_date_only(value: object) -> object:
+    # Pydantic's lax date parsing would also accept a number of days since
+    # the epoch or a datetime at midnight; the contract is YYYY-MM-DD only.
+    if not isinstance(value, str) or not ISO_DATE.fullmatch(value):
+        raise ValueError("must be a calendar date in YYYY-MM-DD form")
+    return value
+
+
 ReportDate = Annotated[
     dt.date,
+    BeforeValidator(_iso_date_only),
     Query(
         le=LAST_REPORTABLE_DATE,
         description="UTC calendar day, YYYY-MM-DD, by order acceptance time",

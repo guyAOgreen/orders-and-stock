@@ -426,6 +426,9 @@ per SKU and current stock per SKU.
 - **Day boundary.** `[date 00:00 UTC, date + 1 00:00 UTC)`, so an order at
   exactly midnight belongs to the new day. The last representable date
   cannot form that interval and is a 422, like a missing or malformed date.
+  The format is strictly `YYYY-MM-DD`: Pydantic's lax date parsing would
+  also accept a day count since the epoch or a datetime at midnight, which
+  a validator rejects before parsing.
 - **Empty days** return zeros, an empty `units_sold` and the current stock.
   No pagination, filtering or other metrics.
 
